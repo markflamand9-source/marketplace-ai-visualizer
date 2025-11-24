@@ -23,7 +23,7 @@ st.write(
 HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # set this in Streamlit secrets
 
 # Text model (chat/styling) – free tier
-HF_TEXT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+HF_TEXT_MODEL = "google/gemma-2-9b-it"
 # Image model (visualizer) – free tier
 HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
 
