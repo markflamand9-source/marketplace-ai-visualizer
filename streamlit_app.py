@@ -16,7 +16,7 @@ st.set_page_config(
     page_icon="🧵",
 )
 
-# Soft background + centered content
+# Global styling (background + width)
 st.markdown(
     """
     <style>
@@ -24,10 +24,9 @@ st.markdown(
         background-color: #f5f6fa;
     }
     .block-container {
-        padding-top: 1.5rem !important;   /* overall top spacing */
-        padding-bottom: 1.5rem;
         max-width: 1200px;
         margin: 0 auto;
+        padding-bottom: 1.5rem;
     }
     </style>
     """,
@@ -35,9 +34,12 @@ st.markdown(
 )
 
 
-# ================== HEADER WITH CENTERED LOGO ==================
+# ================== HEADER WITH CENTERED & LOWERED LOGO ==================
 
-# Three columns; put logo in the middle to guarantee centering
+# Spacer to drop the logo down a bit from the very top
+st.markdown("<div style='height:2.5rem;'></div>", unsafe_allow_html=True)
+
+# 3 columns: put logo in middle one so it's truly centered
 logo_cols = st.columns([1, 2, 1])
 with logo_cols[1]:
     st.image("logo.png", use_column_width=False)
@@ -58,7 +60,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---- SEARCH / CHAT BAR DIRECTLY UNDER HEADER ----
+# ================== ASK-THE-STYLIST SEARCH BAR ==================
+
 st.markdown("### Ask the AI stylist")
 
 with st.form("stylist_form"):
@@ -155,6 +158,7 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
     )
     results = df[mask_generic].copy()
 
+    # fallback so AI always has something
     if results.empty:
         results = df.sample(min(max_results, len(df)), random_state=0)
 
@@ -372,53 +376,52 @@ with col_chat:
 
     products = st.session_state.last_products
     msgs = st.session_state.messages
-    rev_msgs = list(reversed(msgs))  # newest first on top
 
-    for i, msg in enumerate(rev_msgs):
+    # show messages in chronological order (oldest → newest)
+    for msg in msgs:
         avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-        # Under the NEWEST AI message, show product cards
-        if i == 0 and msg["role"] == "assistant":
-            if products is not None and not products.empty:
-                st.markdown("#### Recommended products for this conversation")
+    # under the latest AI message, show product cards
+    if products is not None and not products.empty and msgs and msgs[-1]["role"] == "assistant":
+        st.markdown("#### Recommended products for this conversation")
 
-                for _, row in products.iterrows():
-                    with st.container():
-                        cols = st.columns([1, 3])
+        for _, row in products.iterrows():
+            with st.container():
+                cols = st.columns([1, 3])
 
-                        with cols[0]:
-                            img_url = row.get("Image URL:", "")
-                            if isinstance(img_url, str) and img_url.strip():
-                                try:
-                                    st.image(img_url, use_column_width=True)
-                                except Exception:
-                                    st.empty()
-                            else:
-                                st.empty()
+                with cols[0]:
+                    img_url = row.get("Image URL:", "")
+                    if isinstance(img_url, str) and img_url.strip():
+                        try:
+                            st.image(img_url, use_column_width=True)
+                        except Exception:
+                            st.empty()
+                    else:
+                        st.empty()
 
-                        with cols[1]:
-                            name = row.get("Product name", "")
-                            color = row.get("Color", "")
-                            price = row.get("Price", "")
+                with cols[1]:
+                    name = row.get("Product name", "")
+                    color = row.get("Color", "")
+                    price = row.get("Price", "")
 
-                            st.markdown(f"**{name}**")
-                            st.markdown(f"- Color: **{color}**")
-                            st.markdown(f"- Price: **{price}**")
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"- Color: **{color}**")
+                    st.markdown(f"- Price: **{price}**")
 
-                            desc_text = (
-                                f"This {str(color).lower() if isinstance(color, str) else ''} "
-                                f"{name} helps tie the room together with Market & Place’s "
-                                "soft, cozy textile look."
-                            )
-                            st.markdown(f"- Description: {desc_text}")
+                    desc_text = (
+                        f"This {str(color).lower() if isinstance(color, str) else ''} "
+                        f"{name} helps tie the room together with Market & Place’s "
+                        "soft, cozy textile look."
+                    )
+                    st.markdown(f"- Description: {desc_text}")
 
-                            url = row.get("raw_amazon", "")
-                            if isinstance(url, str) and url.strip():
-                                st.markdown(f"[View on Amazon]({url})")
+                    url = row.get("raw_amazon", "")
+                    if isinstance(url, str) and url.strip():
+                        st.markdown(f"[View on Amazon]({url})")
 
-                    st.markdown("---")
+            st.markdown("---")
 
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
