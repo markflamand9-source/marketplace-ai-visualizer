@@ -15,11 +15,23 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🧠🛋️ Market & Place AI Stylist")
+# ---- HEADER (NO BRAIN EMOJI) ----
+st.title("🛋️🧵 Market & Place AI Stylist")
 st.write(
     "Chat with an AI stylist, search the Market & Place catalog, and generate "
     "concept visualizations using your own product file."
 )
+
+# ---- SEARCH / CHAT BAR DIRECTLY UNDER HEADER ----
+st.markdown("### Ask the AI stylist")
+
+with st.form("stylist_form"):
+    user_input = st.text_input(
+        "Describe what you're looking for:",
+        placeholder="e.g. neutral queen bedding under $80 for a bright room",
+        key="main_query",
+    )
+    submitted = st.form_submit_button("Send")
 
 
 # ================== OPENAI CLIENT ==================
@@ -234,6 +246,26 @@ if "concept_image_bytes" not in st.session_state:
     st.session_state.concept_image_bytes = None
 
 
+# ================== HANDLE TOP SEARCH / CHAT SUBMIT ==================
+
+if submitted and user_input:
+    # user message
+    st.session_state.messages.append({"role": "user", "content": user_input})
+
+    # pick candidate products for this question
+    candidate_products = find_relevant_products(user_input, max_results=6)
+    st.session_state.last_products = candidate_products.copy()
+
+    # use stored room description from right column
+    room_desc = st.session_state.room_description
+
+    # AI reply
+    reply = call_stylist_model(user_input, room_desc, candidate_products)
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+
+    st.rerun()
+
+
 # ================== LAYOUT ==================
 
 col_chat, col_side = st.columns([2.2, 1.3])
@@ -286,27 +318,7 @@ with col_chat:
 
             st.markdown("---")
 
-    # 🔹 Chat input at the bottom
-    user_input = st.chat_input(
-        "Ask for ideas (e.g. 'neutral queen bedding under $80 for a small bright room')"
-    )
-
-    if user_input:
-        # user message
-        st.session_state.messages.append({"role": "user", "content": user_input})
-
-        # pick candidate products for this question
-        candidate_products = find_relevant_products(user_input, max_results=6)
-        st.session_state.last_products = candidate_products.copy()
-
-        # use stored room description from right column
-        room_desc = st.session_state.room_description
-
-        # AI reply
-        reply = call_stylist_model(user_input, room_desc, candidate_products)
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-
-        st.rerun()
+    # (No chat_input here anymore – search/chat is now at the top under the header)
 
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
@@ -372,6 +384,7 @@ with col_side:
         use_container_width=True,
         height=260,
     )
+
 
 
 
