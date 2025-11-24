@@ -15,8 +15,9 @@ st.set_page_config(
     layout="wide",
 )
 
-# ---- HEADER (NO BRAIN EMOJI) ----
-st.title("🛋️🧵 Market & Place AI Stylist")
+# ---- HEADER (CLEANER EMOJIS) ----
+# Only a single, textile-related emoji now (no random suitcase/brain vibes)
+st.title("🧵 Market & Place AI Stylist")
 st.write(
     "Chat with an AI stylist, search the Market & Place catalog, and generate "
     "concept visualizations using your own product file."
@@ -179,19 +180,38 @@ def generate_concept_image(
     Generate a concept visualization of the SAME room, styled with Market & Place
     products.
 
-    - If a room image is provided and the API supports edits, we call images.edits()
-      using that as the base.
-    - If not, we fall back to images.generate() (pure concept render).
+    HARD CONSTRAINTS (the “nuclear code”):
+    - The architecture, camera angle, furniture, windows, doors, floor, wall color,
+      artwork, and objects on shelves MUST remain identical.
+    - The model is ONLY allowed to change textiles:
+        • bedding (duvet, sheets, pillowcases, throws)
+        • decorative pillows
+        • blankets/throws
+        • curtains
+        • towels
+    - Do NOT move or resize furniture.
+    - Do NOT add or remove plants, lamps, artwork, shelves, or decor.
+    - Do NOT change the lighting, perspective, or crop.
     """
 
     top_names = ", ".join(products["Product name"].head(4).tolist())
     prompt = (
-        "You are styling a bedroom photo for the brand Market & Place.\n"
-        "Keep the existing room architecture, bed, windows, and furniture.\n"
-        "Only adjust BEDDING / TOWELS / TEXTILES to look like these Market & Place "
-        f"products: {top_names}.\n"
-        "Do NOT add new furniture or change the room layout. "
-        "Final image should look photorealistic and natural."
+        "You are editing a photo of a real bedroom for the brand Market & Place.\n"
+        "Follow these rules as STRICTLY as possible:\n"
+        "1. Keep the room architecture, camera angle, windows, doors, floor, "
+        "   walls, artwork, shelves, and all furniture EXACTLY the same.\n"
+        "2. Do NOT move, resize, or remove ANY furniture or decor items.\n"
+        "3. Do NOT change the wall color, lighting, perspective, or crop.\n"
+        "4. The ONLY things you are allowed to modify are TEXTILES:\n"
+        "   - bedding (duvet, quilt, sheets, pillowcases, throws)\n"
+        "   - decorative pillows\n"
+        "   - blankets/throws\n"
+        "   - curtains\n"
+        "   - towels\n"
+        "5. If a change would affect anything other than textiles, DO NOT make it.\n\n"
+        "Now restyle ONLY the textiles so they look like these Market & Place products: "
+        f"{top_names}.\n"
+        "Keep everything else identical to the original photo."
     )
 
     try:
@@ -272,11 +292,12 @@ col_chat, col_side = st.columns([2.2, 1.3])
 
 # ----- LEFT: CHAT + PRODUCT IMAGES -----
 with col_chat:
-    st.subheader("💬 Chat with the AI stylist")
+    st.subheader("Chat with the AI stylist")
 
-    # show full chat history
+    # show full chat history with custom avatars (no red/briefcase icons)
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
+        avatar = "🗣️" if msg["role"] == "user" else "🧵"
+        with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
     # 🔹 Product cards ALWAYS directly under the last AI answer
@@ -300,16 +321,23 @@ with col_chat:
                     else:
                         st.empty()
 
-                # info
+                # info + slightly more detailed description
                 with cols[1]:
-                    st.markdown(f"**{row.get('Product name', '')}**")
-                    st.markdown(f"- Color: **{row.get('Color', '')}**")
-                    st.markdown(f"- Price: **{row.get('Price', '')}**")
+                    name = row.get("Product name", "")
+                    color = row.get("Color", "")
+                    price = row.get("Price", "")
 
-                    if DESC_COL:
-                        desc_val = row.get(DESC_COL, "")
-                        if isinstance(desc_val, str) and desc_val.strip():
-                            st.markdown(f"- Description: {desc_val}")
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"- Color: **{color}**")
+                    st.markdown(f"- Price: **{price}**")
+
+                    # Simple generated description to feel richer than just name/color
+                    desc_text = (
+                        f"This {color.lower() if isinstance(color, str) else ''} "
+                        f"{name} adds a cozy, coordinated look to your space and "
+                        "works well with modern, neutral Market & Place styling."
+                    )
+                    st.markdown(f"- Description: {desc_text}")
 
                     url = row.get("raw_amazon", "")
                     if isinstance(url, str) and url.strip():
@@ -317,8 +345,6 @@ with col_chat:
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
-
-    # (No chat_input here anymore – search/chat is now at the top under the header)
 
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
