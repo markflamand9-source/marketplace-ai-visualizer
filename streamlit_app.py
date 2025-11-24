@@ -16,7 +16,7 @@ st.set_page_config(
     page_icon="🧵",
 )
 
-# Softer background, centered content, cleaned-up logo spacing
+# Soft background + centered content
 st.markdown(
     """
     <style>
@@ -24,44 +24,30 @@ st.markdown(
         background-color: #f5f6fa;
     }
     .block-container {
-        padding-top: 0rem !important; 
+        padding-top: 1.5rem !important;   /* overall top spacing */
+        padding-bottom: 1.5rem;
         max-width: 1200px;
         margin: 0 auto;
     }
-
-    /* PERFECTLY CENTERED & LOWERED LOGO */
-    #top-logo img {
-        display: block;
-        margin-left: auto;
-        margin-right: auto;
-        margin-top: 2.2rem !important;      /* 👈 moves logo DOWN */
-        margin-bottom: 1.0rem !important;   /* brings title closer */
-        max-width: 340px;                   /* adjust size here if needed */
-    }
-
-    /* Center the title cleanly */
-    h1 {
-        text-align: center !important;
-        margin-top: 0rem !important;
-        margin-bottom: 0.4rem !important;
-    }
-
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# ================== HEADER WITH LOGO ==================
 
-with st.container():
-    st.markdown('<div id="top-logo">', unsafe_allow_html=True)
-    # logo.png should be the cropped/transparent logo in the repo root
-    st.image("logo.png")
-    st.markdown('</div>', unsafe_allow_html=True)
+# ================== HEADER WITH CENTERED LOGO ==================
+
+# Three columns; put logo in the middle to guarantee centering
+logo_cols = st.columns([1, 2, 1])
+with logo_cols[1]:
+    st.image("logo.png", use_column_width=False)
+
+# Small spacer between logo and title
+st.markdown("<div style='height:0.6rem;'></div>", unsafe_allow_html=True)
 
 st.markdown(
     """
-    <h1 style="text-align:center; margin-top:0.2rem; margin-bottom:0.15rem;">
+    <h1 style="text-align:center; margin-top:0rem; margin-bottom:0.15rem;">
         Market &amp; Place AI Stylist
     </h1>
     <p style="text-align:center; font-size:1.05rem; color:#555; margin-top:0;">
