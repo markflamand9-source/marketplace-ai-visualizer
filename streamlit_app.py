@@ -24,25 +24,32 @@ st.markdown(
         background-color: #f5f6fa;
     }
     .block-container {
-        padding-top: 0.5rem !important;   /* small, safe gap from top */
-        padding-bottom: 1.5rem;
+        padding-top: 0rem !important; 
         max-width: 1200px;
         margin: 0 auto;
     }
-    /* Top logo only */
+
+    /* PERFECTLY CENTERED & LOWERED LOGO */
     #top-logo img {
         display: block;
         margin-left: auto;
         margin-right: auto;
-        margin-top: 0.75rem;              /* room above so it’s not cut */
-        margin-bottom: 0.4rem;            /* keeps title close but not jammed */
-        max-width: 320px;
+        margin-top: 2.2rem !important;      /* 👈 moves logo DOWN */
+        margin-bottom: 1.0rem !important;   /* brings title closer */
+        max-width: 340px;                   /* adjust size here if needed */
     }
+
+    /* Center the title cleanly */
+    h1 {
+        text-align: center !important;
+        margin-top: 0rem !important;
+        margin-bottom: 0.4rem !important;
+    }
+
     </style>
     """,
     unsafe_allow_html=True,
 )
-
 
 # ================== HEADER WITH LOGO ==================
 
