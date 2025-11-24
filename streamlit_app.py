@@ -8,18 +8,49 @@ from PIL import Image
 from openai import OpenAI
 
 
-# ================== PAGE CONFIG ==================
+# ================== PAGE CONFIG & GLOBAL STYLING ==================
 
 st.set_page_config(
     page_title="Market & Place AI Stylist",
     layout="wide",
+    page_icon="🧵",
 )
 
-# ---- HEADER (TEXTILE EMOJI) ----
-st.title("🧵 Market & Place AI Stylist")
-st.write(
-    "Chat with an AI stylist, search the Market & Place catalog, and generate "
-    "concept visualizations using your own product file."
+# Global styling: soft background + nicer padding
+st.markdown(
+    """
+    <style>
+    .stApp {
+        background-color: #f5f6fa;
+    }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+        max-width: 1200px;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ================== HEADER WITH LOGO ==================
+
+# Centered logo (logo.png must be in repo root)
+logo_cols = st.columns([1, 2, 1])
+with logo_cols[1]:
+    st.image("logo.png", use_column_width=False)
+
+st.markdown(
+    """
+    <h1 style="text-align:center; margin-top:0.5rem; margin-bottom:0.2rem;">
+        Market &amp; Place AI Stylist
+    </h1>
+    <p style="text-align:center; font-size:1.05rem; color:#555;">
+        Chat with an AI stylist, search the Market &amp; Place catalog, and generate
+        concept visualizations using your own product file.
+    </p>
+    """,
+    unsafe_allow_html=True,
 )
 
 # ---- SEARCH / CHAT BAR DIRECTLY UNDER HEADER ----
@@ -322,8 +353,7 @@ col_chat, col_side = st.columns([2.2, 1.3])
 with col_chat:
     st.subheader("Chat with the AI stylist")
 
-    # custom avatars (emoji you circled changed here)
-    # user: simple face, assistant: spool of thread
+    # custom avatars (simple + on-brand)
     for msg in st.session_state.messages:
         avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
@@ -376,7 +406,7 @@ with col_chat:
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
 with col_side:
-    st.subheader("🛏️ AI concept visualizer")  # <- palette emoji replaced with bed emoji
+    st.subheader("🛏️ AI concept visualizer")
 
     st.write(
         "Generates a **styled version of your uploaded room**, using Market & Place "
@@ -423,7 +453,6 @@ with col_side:
     st.markdown("---")
     st.subheader("🔎 Quick catalog peek")
 
-    # SEARCH RESULTS WITH PHOTOS
     quick_query = st.text_input("Filter products by keyword", key="quick_query")
     if quick_query:
         preview = find_relevant_products(quick_query, max_results=10)
