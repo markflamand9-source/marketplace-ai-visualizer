@@ -33,6 +33,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ================== HEADER WITH LOGO ==================
 
 # Centered logo (logo.png must be in repo root)
@@ -237,30 +238,28 @@ def generate_concept_image(
     room_image_bytes: bytes | None = None,
 ) -> Image.Image | None:
     """
-    Generate a concept visualization of the SAME room, styled with Market & Place
-    products.
+    Try to generate a concept visualization of the SAME room, styled with
+    Market & Place products.
 
-    HARD CONSTRAINTS:
-    - Architecture, camera angle, furniture, windows, doors, floor, wall color,
-      artwork, shelves, and decor MUST remain identical.
-    - ONLY change textiles:
-        • bedding (duvet, quilt, sheets, pillowcases, throws)
-        • decorative pillows
-        • blankets/throws
-        • curtains
-        • towels
-    - Do NOT move or resize furniture or decor.
-    - Do NOT change lighting, perspective, or crop.
+    We FIRST attempt a true image edit (using the uploaded room photo).
+    If the API / SDK does not support edits, we fall back to a pure
+    concept render and warn the user.
     """
 
     top_names = ", ".join(products["Product name"].head(4).tolist())
+    # ultra-strict "nuclear" instruction
     prompt = (
-        "You are editing a photo of a real bedroom for the brand Market & Place.\n"
-        "Follow these rules as STRICTLY as possible:\n"
-        "1. Keep the room architecture, camera angle, windows, doors, floor, "
-        "   walls, artwork, shelves, and ALL furniture EXACTLY the same.\n"
-        "2. Do NOT move, resize, add, or remove any furniture or decor items.\n"
-        "3. Do NOT change the wall color, lighting, perspective, or crop.\n"
+        "You are doing STRICT PHOTO EDITING for the brand Market & Place.\n"
+        "You receive a real photo of a bedroom. Your job is ONLY to restyle "
+        "TEXTILES in that exact photo. Follow these rules as NON-NEGOTIABLE HARD "
+        "CONSTRAINTS:\n\n"
+        "1. The room architecture, camera angle, bed shape, windows, doors, floor, "
+        "   wall color, artwork, shelves, decor objects, plants, lamps, nightstands, "
+        "   picture frames and all furniture MUST remain IDENTICAL.\n"
+        "2. You are NOT allowed to move, resize, add, or remove any furniture or "
+        "   decor items. Their position, shape and style must stay the same.\n"
+        "3. You are NOT allowed to change the wall color, lighting, perspective, "
+        "   or crop. The photo should look like the same camera shot.\n"
         "4. The ONLY things you are allowed to modify are TEXTILES:\n"
         "   - bedding (duvet, quilt, sheets, pillowcases, throws)\n"
         "   - decorative pillows\n"
@@ -268,14 +267,14 @@ def generate_concept_image(
         "   - curtains\n"
         "   - towels\n"
         "5. If a change would affect anything other than textiles, DO NOT make it.\n\n"
-        "Now restyle ONLY the textiles so they look like these Market & Place products: "
+        "Restyle ONLY the textiles so they look like these Market & Place products: "
         f"{top_names}.\n"
-        "Keep everything else identical to the original photo."
+        "Everything else must be left exactly as in the original photo."
     )
 
     try:
-        # If we have a base image AND the client supports edits, try an edit first.
-        if room_image_bytes is not None and hasattr(client.images, "edits"):
+        if room_image_bytes is not None:
+            # Try a true edit of the uploaded room photo
             img_file = io.BytesIO(room_image_bytes)
             img_file.name = "room.png"
 
@@ -286,7 +285,7 @@ def generate_concept_image(
                 size="1024x1024",
             )
         else:
-            # No base image or edits unsupported: generate a concept from scratch
+            # No base image: fall back to concept (brand-new room)
             img_resp = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
@@ -299,12 +298,26 @@ def generate_concept_image(
         return img
 
     except Exception as e:
+        # If edits() isn't available in the SDK or fails, we warn and fall back
         st.warning(
-            "Could not generate concept image. "
-            "This can be due to org verification, billing, or API limits.\n\n"
-            f"Details: {e}"
+            "Could not perform a true photo edit on your room image. "
+            "Your OpenAI setup may not support image edits yet, so the result "
+            "below might be a brand-new concept room instead of your exact photo.\n\n"
+            f"Technical details: {e}"
         )
-        return None
+        try:
+            img_resp = client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt,
+                size="1024x1024",
+            )
+            b64_data = img_resp.data[0].b64_json
+            image_bytes = base64.b64decode(b64_data)
+            img = Image.open(io.BytesIO(image_bytes))
+            return img
+        except Exception as e2:
+            st.error(f"Image generation also failed: {e2}")
+            return None
 
 
 # ================== STREAMLIT STATE ==================
@@ -353,55 +366,59 @@ col_chat, col_side = st.columns([2.2, 1.3])
 with col_chat:
     st.subheader("Chat with the AI stylist")
 
-    # custom avatars (simple + on-brand)
-    for msg in st.session_state.messages:
+    products = st.session_state.last_products
+    msgs = st.session_state.messages
+    rev_msgs = list(reversed(msgs))  # newest first for display
+
+    # Show newest conversation at the top,
+    # and put the product cards right under the newest AI answer.
+    for i, msg in enumerate(rev_msgs):
         avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # Product cards directly under the last AI answer
-    products = st.session_state.last_products
+        # Immediately under the newest AI message, show the product cards
+        if i == 0 and msg["role"] == "assistant":
+            if products is not None and not products.empty:
+                st.markdown("#### Recommended products for this conversation")
 
-    if products is not None and not products.empty:
-        st.markdown("#### Recommended products for this conversation")
+                for _, row in products.iterrows():
+                    with st.container():
+                        cols = st.columns([1, 3])
 
-        for _, row in products.iterrows():
-            with st.container():
-                cols = st.columns([1, 3])
+                        # image
+                        with cols[0]:
+                            img_url = row.get("Image URL:", "")
+                            if isinstance(img_url, str) and img_url.strip():
+                                try:
+                                    st.image(img_url, use_column_width=True)
+                                except Exception:
+                                    st.empty()
+                            else:
+                                st.empty()
 
-                # image
-                with cols[0]:
-                    img_url = row.get("Image URL:", "")
-                    if isinstance(img_url, str) and img_url.strip():
-                        try:
-                            st.image(img_url, use_column_width=True)
-                        except Exception:
-                            st.empty()
-                    else:
-                        st.empty()
+                        # info + light description
+                        with cols[1]:
+                            name = row.get("Product name", "")
+                            color = row.get("Color", "")
+                            price = row.get("Price", "")
 
-                # info + light description
-                with cols[1]:
-                    name = row.get("Product name", "")
-                    color = row.get("Color", "")
-                    price = row.get("Price", "")
+                            st.markdown(f"**{name}**")
+                            st.markdown(f"- Color: **{color}**")
+                            st.markdown(f"- Price: **{price}**")
 
-                    st.markdown(f"**{name}**")
-                    st.markdown(f"- Color: **{color}**")
-                    st.markdown(f"- Price: **{price}**")
+                            desc_text = (
+                                f"This {str(color).lower() if isinstance(color, str) else ''} "
+                                f"{name} helps tie the room together with Market & Place’s "
+                                "soft, cozy textile look."
+                            )
+                            st.markdown(f"- Description: {desc_text}")
 
-                    desc_text = (
-                        f"This {str(color).lower() if isinstance(color, str) else ''} "
-                        f"{name} helps tie the room together with Market & Place’s "
-                        "soft, cozy textile look."
-                    )
-                    st.markdown(f"- Description: {desc_text}")
+                            url = row.get("raw_amazon", "")
+                            if isinstance(url, str) and url.strip():
+                                st.markdown(f"[View on Amazon]({url})")
 
-                    url = row.get("raw_amazon", "")
-                    if isinstance(url, str) and url.strip():
-                        st.markdown(f"[View on Amazon]({url})")
-
-            st.markdown("---")
+                    st.markdown("---")
 
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
@@ -410,8 +427,9 @@ with col_side:
 
     st.write(
         "Generates a **styled version of your uploaded room**, using Market & Place "
-        "products as inspiration. The AI tries to keep layout/furniture the same and "
-        "only change textiles. Results are still generative – not pixel-perfect overlays."
+        "products as inspiration. The AI is instructed to keep layout/furniture the "
+        "same and only change textiles. If image edits are not supported in your "
+        "OpenAI setup, results may be a new concept room instead of an exact edit."
     )
 
     uploaded_image = st.file_uploader(
@@ -450,6 +468,42 @@ with col_side:
             use_column_width=True,
         )
 
+        # 🔹 Products used in this concept (shop the look)
+        st.markdown("#### Products used in this concept")
+
+        concept_products = st.session_state.last_products
+        if concept_products is not None and not concept_products.empty:
+            for _, row in concept_products.iterrows():
+                with st.container():
+                    cols = st.columns([1, 3])
+
+                    # product image
+                    with cols[0]:
+                        img_url = row.get("Image URL:", "")
+                        if isinstance(img_url, str) and img_url.strip():
+                            try:
+                                st.image(img_url, use_column_width=True)
+                            except Exception:
+                                st.empty()
+                        else:
+                            st.empty()
+
+                    # product info + link
+                    with cols[1]:
+                        name = row.get("Product name", "")
+                        color = row.get("Color", "")
+                        price = row.get("Price", "")
+                        url = row.get("raw_amazon", "")
+
+                        st.markdown(f"**{name}**")
+                        st.markdown(f"- Color: **{color}**")
+                        st.markdown(f"- Price: **{price}**")
+                        if isinstance(url, str) and url.strip():
+                            # IMPORTANT: Amazon URL exactly as stored
+                            st.markdown(f"[View on Amazon]({url})")
+
+                st.markdown("---")
+
     st.markdown("---")
     st.subheader("🔎 Quick catalog peek")
 
@@ -487,6 +541,7 @@ with col_side:
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
+
 
 
 
