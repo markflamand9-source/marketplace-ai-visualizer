@@ -16,7 +16,6 @@ st.set_page_config(
     page_icon="🧵",
 )
 
-# Global styling (background + width)
 st.markdown(
     """
     <style>
@@ -36,16 +35,12 @@ st.markdown(
 
 # ================== HEADER WITH CENTERED & LOWERED LOGO ==================
 
-# Spacer to drop the logo down a bit from the very top
 st.markdown("<div style='height:2.5rem;'></div>", unsafe_allow_html=True)
 
-# 3 columns: put logo in the middle one so it's truly centered
 logo_cols = st.columns([1, 2, 1])
 with logo_cols[1]:
-    # logo.png should be in the repo root
     st.image("logo.png", use_column_width=False)
 
-# Small spacer between logo and title
 st.markdown("<div style='height:0.6rem;'></div>", unsafe_allow_html=True)
 
 st.markdown(
@@ -78,7 +73,6 @@ with st.form("stylist_form"):
 # ================== OPENAI CLIENT ==================
 
 def get_openai_client() -> OpenAI:
-    """Get OpenAI client using OPENAI_API_KEY from env or Streamlit secrets."""
     api_key = os.environ.get("OPENAI_API_KEY")
 
     try:
@@ -105,7 +99,6 @@ client = get_openai_client()
 
 @st.cache_data
 def load_data() -> pd.DataFrame:
-    """Load Market & Place catalog from Excel in the repo."""
     return pd.read_excel("market_and_place_products.xlsx")
 
 
@@ -120,7 +113,7 @@ except Exception as e:
     )
     st.stop()
 
-DESC_COL = None  # there is no separate description column
+DESC_COL = None  # no dedicated description column
 
 
 # ================== PRODUCT HELPERS ==================
@@ -145,8 +138,7 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
     ]
     wants_towel = any(t in q for t in towel_terms_in_query)
 
-    # Look for towel-like products in the name
-    towel_pattern = "towel|bath sheet|washcloth|wash cloth"
+    towel_pattern = "towel|bath sheet|bath rug|bathmat|bath mat|washcloth|wash cloth"
 
     if wants_towel:
         name_series = df["Product name"].fillna("").str.lower()
@@ -155,14 +147,12 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
         if not results.empty:
             return results.head(max_results)
 
-    # Generic keyword search
     mask_generic = (
         df["Product name"].fillna("").str.lower().str.contains(q)
         | df["Color"].fillna("").str.lower().str.contains(q)
     )
     results = df[mask_generic].copy()
 
-    # Fallback so AI always has something
     if results.empty:
         results = df.sample(min(max_results, len(df)), random_state=0)
 
@@ -170,7 +160,6 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
 
 
 def format_products_for_prompt(products: pd.DataFrame) -> str:
-    """Compact text block describing products for the model."""
     lines = []
     for _, row in products.iterrows():
         line = (
@@ -187,7 +176,6 @@ def format_products_for_prompt(products: pd.DataFrame) -> str:
 
 def call_stylist_model(user_message: str, room_context: str,
                        products: pd.DataFrame) -> str:
-    """Ask GPT-4.1-mini for styling suggestions based on the catalog."""
     product_block = format_products_for_prompt(products)
     room_part = room_context or "The user did not describe the room."
 
@@ -236,25 +224,52 @@ You must follow these rules carefully:
         return f"❌ Error calling OpenAI chat model: `{e}`"
 
 
+# ================== ROOM-TYPE INFERENCE FOR IMAGES ==================
+
+def infer_room_type(room_description: str, last_query: str, products: pd.DataFrame) -> str:
+    """
+    Very simple heuristic: decide if we're styling a bathroom vs bedroom vs generic room.
+    """
+    text = (room_description or "") + " " + (last_query or "")
+    text = text.lower()
+
+    name_series = products["Product name"].fillna("").str.lower() if products is not None else pd.Series([])
+
+    # Bathroom signals
+    bath_keywords = [
+        "bathroom", "shower", "toilet", "wc", "sink",
+        "towel", "bath towel", "hand towel", "bath rug", "bath mat", "bathmat",
+    ]
+    if any(k in text for k in bath_keywords) or name_series.str.contains("towel|bath rug|bathmat|bath mat").any():
+        return "bathroom"
+
+    # Bedroom signals
+    bed_keywords = [
+        "bedroom", "bed", "duvet", "comforter", "quilt", "sheet set", "pillowcase",
+    ]
+    if any(k in text for k in bed_keywords) or name_series.str.contains("quilt|sheet set|duvet|comforter").any():
+        return "bedroom"
+
+    return "room"
+
+
 # ================== OPENAI CALLS (IMAGES) ==================
 
 def generate_concept_image(
     room_description: str,
     products: pd.DataFrame,
     room_image_bytes: bytes | None = None,
+    last_query: str = "",
 ) -> Image.Image | None:
     """
     Generate a concept visualization styled with Market & Place products.
 
-    NOTE:
-    - The current Images API only supports `images.generate` (no `edits`).
-    - We therefore use a very strict prompt that tells the model to:
-        * keep the same room layout / architecture
-        * only change textiles
-        * never put towels on the bed
-    - If a photo is uploaded, we tell the model to imagine that same room and restyle
-      the textiles; the actual photo is used for the user preview, not as an edit base.
+    We cannot truly "edit" the upload with the new API, so we:
+    - Infer room type (bathroom/bedroom/room)
+    - Use a very strong prompt to keep the same kind of room and only change textiles.
     """
+
+    room_type = infer_room_type(room_description, last_query, products)
 
     if products is None or products.empty:
         product_names = "the available Market & Place textiles"
@@ -263,31 +278,48 @@ def generate_concept_image(
 
     base_rules = (
         "You are an interior design image generator for the brand Market & Place.\n\n"
-        "NON-NEGOTIABLE RULES:\n"
-        "1. Imagine the SAME room as the user's real room: same layout, walls, "
-        "   windows, bed position, furniture positions, decor objects, lighting, "
-        "   and camera angle.\n"
-        "2. You MUST NOT change the architecture, wall colors, furniture style, "
-        "   floor, decor, or perspective.\n"
-        "3. You MUST ONLY change TEXTILES:\n"
+        "ABSOLUTE, NON-NEGOTIABLE RULES:\n"
+        "1. You must imagine the SAME TYPE of room as described (bathroom vs bedroom).\n"
+        "2. Keep the same kind of layout, walls, windows, door positions, and general "
+        "   furniture locations as the user's real room.\n"
+        "3. You MUST NOT change the architecture, wall colors, floor, or perspective.\n"
+        "4. You MUST ONLY change TEXTILES:\n"
         "   - bedding (comforter, quilt, duvet, sheets, pillowcases, decorative pillows)\n"
         "   - blankets/throws\n"
         "   - curtains\n"
-        "   - towels and bath rugs (ONLY if the room is clearly a bathroom).\n"
-        "4. Towels must ONLY appear in realistic towel locations: racks, hooks, "
-        "   shelves, benches, or neatly folded in a bathroom. NEVER put towels on the bed.\n"
-        "5. Do not add or remove furniture, art, plants, or other objects.\n"
-        "6. The final image should look like a natural, realistic photo.\n\n"
+        "   - towels and bath rugs ONLY if it is a bathroom.\n"
+        "5. Towels must ONLY appear in realistic towel locations: racks, hooks, "
+        "   shelves, benches, or neatly folded in a bathroom. NEVER put towels on a bed.\n"
+        "6. Do not add or remove furniture, art, plants, or non-textile objects.\n"
+        "7. The final image should look like a natural, realistic photo.\n\n"
         f"Use these Market & Place products as inspiration for the textiles: {product_names}.\n\n"
     )
 
-    if room_image_bytes is not None:
-        room_context = (
-            "The user has uploaded a photo of their room. Recreate that same room "
-            "as closely as possible and only restyle the textiles.\n\n"
+    # Room-type specific constraints
+    if room_type == "bathroom":
+        room_type_block = (
+            "THIS IS A BATHROOM. The generated image MUST clearly be a bathroom.\n"
+            "- Include typical bathroom features like a shower, sink/vanity, toilet, and tiled walls or floor.\n"
+            "- You MUST NOT show any kind of bed, sofa, or bedroom furniture. If you start to imagine a bed, STOP and keep it a bathroom.\n\n"
+        )
+    elif room_type == "bedroom":
+        room_type_block = (
+            "THIS IS A BEDROOM. The generated image MUST clearly be a bedroom with a bed as the main furniture.\n"
+            "- You MUST NOT show a toilet, shower, or bathroom fixtures.\n\n"
         )
     else:
-        room_context = (
+        room_type_block = (
+            "This is a generic living space/room. Keep the same type of room as described by the user.\n\n"
+        )
+
+    # Explain uploaded photo (if present)
+    if room_image_bytes is not None:
+        upload_context = (
+            "The user has uploaded a photo of their room. Recreate a room that strongly "
+            "resembles that layout and type of space, but with updated textiles only.\n\n"
+        )
+    else:
+        upload_context = (
             "The user did NOT upload a photo. Create a realistic room that matches "
             "their description, then apply the textile rules above.\n\n"
         )
@@ -296,7 +328,8 @@ def generate_concept_image(
 
     prompt = (
         base_rules
-        + room_context
+        + room_type_block
+        + upload_context
         + "USER ROOM DESCRIPTION:\n"
         + desc_text
     )
@@ -338,11 +371,15 @@ if "uploaded_room_image_bytes" not in st.session_state:
 if "concept_image_bytes" not in st.session_state:
     st.session_state.concept_image_bytes = None
 
+if "last_query" not in st.session_state:
+    st.session_state.last_query = ""
+
 
 # ================== HANDLE TOP SEARCH / CHAT SUBMIT ==================
 
 if submitted and user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.last_query = user_input
 
     candidate_products = find_relevant_products(user_input, max_results=6)
     st.session_state.last_products = candidate_products.copy()
@@ -366,13 +403,11 @@ with col_chat:
     products = st.session_state.last_products
     msgs = st.session_state.messages
 
-    # show messages in chronological order (oldest → newest)
     for msg in msgs:
         avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # under the latest AI message, show product cards
     if products is not None and not products.empty and msgs and msgs[-1]["role"] == "assistant":
         st.markdown("#### Recommended products for this conversation")
 
@@ -420,16 +455,15 @@ with col_side:
     st.write(
         "Generates a **styled version of your room**, using Market & Place "
         "products as inspiration.\n\n"
-        "- The AI is instructed to **copy your room layout** and **only change textiles** "
-        "(bedding, pillows, throws, curtains, towels/bath rugs).\n"
-        "- It is explicitly told **not to move furniture, change walls, or put towels "
-        "on the bed**.\n"
-        "- Because the current image API does not support direct photo editing, it "
-        "recreates the room based on your description and these rules."
+        "- The AI is instructed to **keep the same type of room** (bathroom stays bathroom, "
+        "bedroom stays bedroom) and **only change textiles**.\n"
+        "- It is explicitly told **not to move furniture, change walls, or put towels on the bed**.\n"
+        "- Because the current image API cannot directly edit photos, it recreates the room "
+        "from your description + these rules."
     )
 
     uploaded_image = st.file_uploader(
-        "Upload a photo of your room (for the AI to imitate the layout & for preview)",
+        "Upload a photo of your room (for the AI to imitate layout & for preview)",
         type=["jpg", "jpeg", "png"],
     )
     if uploaded_image is not None:
@@ -440,7 +474,7 @@ with col_side:
     room_description = st.text_area(
         "Describe your room & what you want:",
         value=st.session_state.room_description,
-        placeholder="e.g. Small bedroom, white walls, light wood floors, want cozy neutral bedding...",
+        placeholder="e.g. Small bathroom with walk-in shower and grey tiles, want soft cream towels...",
     )
     st.session_state.room_description = room_description
 
@@ -451,6 +485,7 @@ with col_side:
                 st.session_state.room_description,
                 products_for_image,
                 st.session_state.uploaded_room_image_bytes,
+                st.session_state.last_query,
             )
             if img is not None:
                 buf = io.BytesIO()
