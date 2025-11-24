@@ -53,6 +53,7 @@ client = get_openai_client()
 
 @st.cache_data
 def load_data() -> pd.DataFrame:
+    """Load Market & Place catalog from Excel in the repo."""
     return pd.read_excel("market_and_place_products.xlsx")
 
 
@@ -61,25 +62,19 @@ try:
 except Exception as e:
     st.error(
         "❌ Could not load `market_and_place_products.xlsx`.\n\n"
-        "Make sure the file is in the repo root and has columns at least:\n"
-        "`Product name`, `Color`, `Price`, `raw_amazon`, and optionally "
-        "`Image URL:` and `Description` or `Product description`.\n\n"
+        "Make sure the file is in the repo root and has these columns:\n"
+        "`Product name`, `Color`, `Price`, `raw_amazon`, `Image URL:`.\n\n"
         f"Technical details: {e}"
     )
     st.stop()
 
-# normalise description column
-if "Description" in df.columns:
-    DESC_COL = "Description"
-elif "Product description" in df.columns:
-    DESC_COL = "Product description"
-else:
-    DESC_COL = None
+# There is no dedicated description column in this file.
+DESC_COL = None
 
 
 # ================== PRODUCT HELPERS ==================
 
-def find_relevant_products(query: str, max_results: int = 8) -> pd.DataFrame:
+def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
     """Simple keyword search over product name and color."""
     if not query:
         return df.head(max_results)
@@ -104,14 +99,11 @@ def format_products_for_prompt(products: pd.DataFrame) -> str:
     """Compact text block describing products for the model."""
     lines = []
     for _, row in products.iterrows():
-        desc = row.get(DESC_COL, "") if DESC_COL else ""
         line = (
             f"- Name: {row.get('Product name', '')}\n"
             f"  Color: {row.get('Color', '')}\n"
             f"  Price: {row.get('Price', '')}\n"
-            f"  Description: {desc}\n"
-            f"  Amazon URL: {row.get('raw_amazon', '')}\n"
-            f"  Image URL: {row.get('Image URL:', '')}"
+            f"  Amazon URL: {row.get('raw_amazon', '')}"
         )
         lines.append(line)
     return "\n\n".join(lines)
@@ -135,10 +127,9 @@ You must follow these rules carefully:
   • Product name  
   • Color  
   • Price  
-  • Short description  
-  • Amazon URL (copy EXACTLY from the data, do not change, trim, or add any parameters)  
+  • Short explanation of why it fits  
+  • Amazon URL (copy EXACTLY from the data, do not change, trim, or add parameters)  
 - Group recommendations into a short numbered list (3–5 items).
-- Explain briefly *why* each product fits the user's room.
 - Do NOT invent products or URLs that are not in the list.
 """
 
@@ -160,7 +151,7 @@ You must follow these rules carefully:
             model="gpt-4.1-mini",
             messages=messages,
             temperature=0.7,
-            max_tokens=700,
+            max_tokens=800,
         )
         return response.choices[0].message.content
     except Exception as e:
@@ -174,38 +165,48 @@ def generate_concept_image(
 ) -> Image.Image | None:
     """
     Generate a concept visualization of the SAME room, styled with Market & Place
-    products. If a room image is provided, we use it as the base and ask the
-    model to keep layout and furniture, only changing textiles.
+    products.
+
+    - If a room image is provided and the API supports edits, we call images.edits()
+      using that as the base.
+    - If not, we fall back to images.generate() (pure concept render).
     """
 
     top_names = ", ".join(products["Product name"].head(4).tolist())
     prompt = (
-        "You are editing a room photo for the brand Market & Place.\n"
-        "Keep the existing room architecture, furniture, windows, and perspective.\n"
+        "You are styling a bedroom photo for the brand Market & Place.\n"
+        "Keep the existing room architecture, bed, windows, and furniture.\n"
         "Only adjust BEDDING / TOWELS / TEXTILES to look like these Market & Place "
         f"products: {top_names}.\n"
-        "Do NOT add extra furniture, decorations, or new windows. "
-        "Do NOT change the wall color unless it helps the textiles read clearly. "
-        "Final image should look photorealistic."
+        "Do NOT add new furniture or change the room layout. "
+        "Final image should look photorealistic and natural."
     )
 
     try:
-        kwargs = {
-            "model": "gpt-image-1",
-            "prompt": prompt,
-            "size": "1024x1024",
-        }
+        # If we have a base image AND the client supports edits, try an edit first.
+        if room_image_bytes is not None and hasattr(client.images, "edits"):
+            img_file = io.BytesIO(room_image_bytes)
+            img_file.name = "room.png"
 
-        if room_image_bytes is not None:
-            b64_image = base64.b64encode(room_image_bytes).decode("utf-8")
-            # use uploaded room as base image
-            kwargs["image"] = b64_image
+            img_resp = client.images.edits(
+                model="gpt-image-1",
+                image=img_file,
+                prompt=prompt,
+                size="1024x1024",
+            )
+        else:
+            # No base image or edits unsupported: generate a concept from scratch
+            img_resp = client.images.generate(
+                model="gpt-image-1",
+                prompt=prompt,
+                size="1024x1024",
+            )
 
-        img_resp = client.images.generate(**kwargs)
         b64_data = img_resp.data[0].b64_json
         image_bytes = base64.b64decode(b64_data)
         img = Image.open(io.BytesIO(image_bytes))
         return img
+
     except Exception as e:
         st.warning(
             "Could not generate concept image. "
@@ -241,44 +242,22 @@ col_chat, col_side = st.columns([2.2, 1.3])
 with col_chat:
     st.subheader("💬 Chat with the AI stylist")
 
-    # display history
+    # show full chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    user_input = st.chat_input(
-        "Ask for ideas (e.g. 'neutral queen bedding under $80 for a small bright room')"
-    )
-
-    if user_input:
-        # show user message immediately
-        st.session_state.messages.append({"role": "user", "content": user_input})
-
-        # choose candidate products based on query
-        candidate_products = find_relevant_products(user_input, max_results=8)
-        st.session_state.last_products = candidate_products.copy()
-
-        # use stored room description from the right column
-        room_desc = st.session_state.room_description
-
-        # call OpenAI
-        reply = call_stylist_model(user_input, room_desc, candidate_products)
-
-        st.session_state.messages.append({"role": "assistant", "content": reply})
-
-        st.rerun()
-
-    st.markdown("---")
-    st.subheader("⭐ AI-recommended products (from your catalog)")
-
+    # 🔹 Product cards ALWAYS directly under the last AI answer
     products = st.session_state.last_products
 
     if products is not None and not products.empty:
+        st.markdown("#### Recommended products for this conversation")
+
         for _, row in products.iterrows():
             with st.container():
                 cols = st.columns([1, 3])
 
-                # image
+                # image (from Image URL:, which points to Amazon-hosted image)
                 with cols[0]:
                     img_url = row.get("Image URL:", "")
                     if isinstance(img_url, str) and img_url.strip():
@@ -305,9 +284,29 @@ with col_chat:
                         # IMPORTANT: show Amazon URL EXACTLY as stored
                         st.markdown(f"[View on Amazon]({url})")
 
-                st.markdown("---")
-    else:
-        st.write("Ask the stylist a question to see recommendations here.")
+            st.markdown("---")
+
+    # 🔹 Chat input at the bottom
+    user_input = st.chat_input(
+        "Ask for ideas (e.g. 'neutral queen bedding under $80 for a small bright room')"
+    )
+
+    if user_input:
+        # user message
+        st.session_state.messages.append({"role": "user", "content": user_input})
+
+        # pick candidate products for this question
+        candidate_products = find_relevant_products(user_input, max_results=6)
+        st.session_state.last_products = candidate_products.copy()
+
+        # use stored room description from right column
+        room_desc = st.session_state.room_description
+
+        # AI reply
+        reply = call_stylist_model(user_input, room_desc, candidate_products)
+        st.session_state.messages.append({"role": "assistant", "content": reply})
+
+        st.rerun()
 
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
@@ -315,7 +314,7 @@ with col_side:
     st.subheader("🖼️ Your room")
 
     uploaded_image = st.file_uploader(
-        "Upload a photo of your room (used as the base for styling)",
+        "Upload a photo of your room (used as the base for styling where possible)",
         type=["jpg", "jpeg", "png"],
     )
     if uploaded_image is not None:
@@ -336,15 +335,15 @@ with col_side:
     st.write(
         "Generates a **styled version of your uploaded room**, using Market & Place "
         "products as inspiration. The AI tries to keep layout/furniture the same and "
-        "only change textiles, but results are still generative – not perfect overlays."
+        "only change textiles. Results are still generative – not pixel-perfect overlays."
     )
 
     if st.button("Generate concept image"):
         with st.spinner("Asking OpenAI to restyle your room..."):
-            products = st.session_state.last_products
+            products_for_image = st.session_state.last_products
             img = generate_concept_image(
                 st.session_state.room_description,
-                products,
+                products_for_image,
                 st.session_state.uploaded_room_image_bytes,
             )
             if img is not None:
@@ -371,7 +370,7 @@ with col_side:
     st.dataframe(
         preview[["Product name", "Color", "Price", "raw_amazon"]],
         use_container_width=True,
-        height=250,
+        height=260,
     )
 
 
