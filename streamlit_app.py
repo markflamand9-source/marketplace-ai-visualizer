@@ -15,8 +15,7 @@ st.set_page_config(
     layout="wide",
 )
 
-# ---- HEADER (CLEANER EMOJIS) ----
-# Only a single, textile-related emoji now (no random suitcase/brain vibes)
+# ---- HEADER (TEXTILE EMOJI) ----
 st.title("🧵 Market & Place AI Stylist")
 st.write(
     "Chat with an AI stylist, search the Market & Place catalog, and generate "
@@ -88,18 +87,44 @@ DESC_COL = None
 # ================== PRODUCT HELPERS ==================
 
 def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
-    """Simple keyword search over product name and color."""
+    """
+    Keyword search over product name and color.
+
+    Special handling:
+    - If the user mentions towels (towel, towels, bath towel, bath sheet, etc.),
+      first try to return ONLY towel products.
+    """
     if not query:
         return df.head(max_results)
 
     q = query.lower()
 
-    mask = (
+    # detect towel intent
+    towel_terms_in_query = [
+        "towel", "towels", "bath towel", "bath towels",
+        "hand towel", "hand towels", "washcloth", "wash cloth",
+        "bath sheet", "bath sheets",
+    ]
+    wants_towel = any(t in q for t in towel_terms_in_query)
+
+    # towel-specific filter
+    towel_pattern = "towel|bath sheet|washcloth|wash cloth"
+
+    if wants_towel:
+        name_series = df["Product name"].fillna("").str.lower()
+        mask_towel = name_series.str.contains(towel_pattern)
+        results = df[mask_towel].copy()
+
+        # if we actually have towels, return those first
+        if not results.empty:
+            return results.head(max_results)
+
+    # generic fallback search (name + color)
+    mask_generic = (
         df["Product name"].fillna("").str.lower().str.contains(q)
         | df["Color"].fillna("").str.lower().str.contains(q)
     )
-
-    results = df[mask].copy()
+    results = df[mask_generic].copy()
 
     # fallback so AI always has something
     if results.empty:
@@ -143,6 +168,10 @@ You must follow these rules carefully:
   • Short explanation of why it fits  
   • Amazon URL (copy EXACTLY from the data, do not change, trim, or add parameters)  
 - Group recommendations into a short numbered list (3–5 items).
+- If the user asks for towels, treat all of these as valid towel terms:
+  "towel", "towels", "bath towel", "bath sheet", "hand towel", "washcloth".
+- If no exact towel products exist in the provided list, say this clearly and then
+  suggest the closest suitable alternatives from the list (but do NOT invent towels).
 - Do NOT invent products or URLs that are not in the list.
 """
 
@@ -180,18 +209,17 @@ def generate_concept_image(
     Generate a concept visualization of the SAME room, styled with Market & Place
     products.
 
-    HARD CONSTRAINTS (the “nuclear code”):
-    - The architecture, camera angle, furniture, windows, doors, floor, wall color,
-      artwork, and objects on shelves MUST remain identical.
-    - The model is ONLY allowed to change textiles:
-        • bedding (duvet, sheets, pillowcases, throws)
+    HARD CONSTRAINTS:
+    - Architecture, camera angle, furniture, windows, doors, floor, wall color,
+      artwork, shelves, and decor MUST remain identical.
+    - ONLY change textiles:
+        • bedding (duvet, quilt, sheets, pillowcases, throws)
         • decorative pillows
         • blankets/throws
         • curtains
         • towels
-    - Do NOT move or resize furniture.
-    - Do NOT add or remove plants, lamps, artwork, shelves, or decor.
-    - Do NOT change the lighting, perspective, or crop.
+    - Do NOT move or resize furniture or decor.
+    - Do NOT change lighting, perspective, or crop.
     """
 
     top_names = ", ".join(products["Product name"].head(4).tolist())
@@ -199,8 +227,8 @@ def generate_concept_image(
         "You are editing a photo of a real bedroom for the brand Market & Place.\n"
         "Follow these rules as STRICTLY as possible:\n"
         "1. Keep the room architecture, camera angle, windows, doors, floor, "
-        "   walls, artwork, shelves, and all furniture EXACTLY the same.\n"
-        "2. Do NOT move, resize, or remove ANY furniture or decor items.\n"
+        "   walls, artwork, shelves, and ALL furniture EXACTLY the same.\n"
+        "2. Do NOT move, resize, add, or remove any furniture or decor items.\n"
         "3. Do NOT change the wall color, lighting, perspective, or crop.\n"
         "4. The ONLY things you are allowed to modify are TEXTILES:\n"
         "   - bedding (duvet, quilt, sheets, pillowcases, throws)\n"
@@ -294,13 +322,14 @@ col_chat, col_side = st.columns([2.2, 1.3])
 with col_chat:
     st.subheader("Chat with the AI stylist")
 
-    # show full chat history with custom avatars (no red/briefcase icons)
+    # custom avatars (emoji you circled changed here)
+    # user: simple face, assistant: spool of thread
     for msg in st.session_state.messages:
-        avatar = "🗣️" if msg["role"] == "user" else "🧵"
+        avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-    # 🔹 Product cards ALWAYS directly under the last AI answer
+    # Product cards directly under the last AI answer
     products = st.session_state.last_products
 
     if products is not None and not products.empty:
@@ -310,7 +339,7 @@ with col_chat:
             with st.container():
                 cols = st.columns([1, 3])
 
-                # image (from Image URL:, which points to Amazon-hosted image)
+                # image
                 with cols[0]:
                     img_url = row.get("Image URL:", "")
                     if isinstance(img_url, str) and img_url.strip():
@@ -321,7 +350,7 @@ with col_chat:
                     else:
                         st.empty()
 
-                # info + slightly more detailed description
+                # info + light description
                 with cols[1]:
                     name = row.get("Product name", "")
                     color = row.get("Color", "")
@@ -331,17 +360,15 @@ with col_chat:
                     st.markdown(f"- Color: **{color}**")
                     st.markdown(f"- Price: **{price}**")
 
-                    # Simple generated description to feel richer than just name/color
                     desc_text = (
-                        f"This {color.lower() if isinstance(color, str) else ''} "
-                        f"{name} adds a cozy, coordinated look to your space and "
-                        "works well with modern, neutral Market & Place styling."
+                        f"This {str(color).lower() if isinstance(color, str) else ''} "
+                        f"{name} helps tie the room together with Market & Place’s "
+                        "soft, cozy textile look."
                     )
                     st.markdown(f"- Description: {desc_text}")
 
                     url = row.get("raw_amazon", "")
                     if isinstance(url, str) and url.strip():
-                        # IMPORTANT: show Amazon URL EXACTLY as stored
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
@@ -349,7 +376,13 @@ with col_chat:
 
 # ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
 with col_side:
-    st.subheader("🖼️ Your room")
+    st.subheader("🛏️ AI concept visualizer")  # <- palette emoji replaced with bed emoji
+
+    st.write(
+        "Generates a **styled version of your uploaded room**, using Market & Place "
+        "products as inspiration. The AI tries to keep layout/furniture the same and "
+        "only change textiles. Results are still generative – not pixel-perfect overlays."
+    )
 
     uploaded_image = st.file_uploader(
         "Upload a photo of your room (used as the base for styling where possible)",
@@ -366,15 +399,6 @@ with col_side:
         placeholder="e.g. Small bedroom, white walls, light wood floors, want cozy neutral bedding...",
     )
     st.session_state.room_description = room_description
-
-    st.markdown("---")
-    st.subheader("🎨 AI concept visualizer")
-
-    st.write(
-        "Generates a **styled version of your uploaded room**, using Market & Place "
-        "products as inspiration. The AI tries to keep layout/furniture the same and "
-        "only change textiles. Results are still generative – not pixel-perfect overlays."
-    )
 
     if st.button("Generate concept image"):
         with st.spinner("Asking OpenAI to restyle your room..."):
@@ -399,17 +423,42 @@ with col_side:
     st.markdown("---")
     st.subheader("🔎 Quick catalog peek")
 
+    # SEARCH RESULTS WITH PHOTOS
     quick_query = st.text_input("Filter products by keyword", key="quick_query")
     if quick_query:
         preview = find_relevant_products(quick_query, max_results=10)
     else:
         preview = df.head(10)
 
-    st.dataframe(
-        preview[["Product name", "Color", "Price", "raw_amazon"]],
-        use_container_width=True,
-        height=260,
-    )
+    if not preview.empty:
+        for _, row in preview.iterrows():
+            with st.container():
+                cols = st.columns([1, 3])
+
+                with cols[0]:
+                    img_url = row.get("Image URL:", "")
+                    if isinstance(img_url, str) and img_url.strip():
+                        try:
+                            st.image(img_url, use_column_width=True)
+                        except Exception:
+                            st.empty()
+                    else:
+                        st.empty()
+
+                with cols[1]:
+                    name = row.get("Product name", "")
+                    color = row.get("Color", "")
+                    price = row.get("Price", "")
+                    url = row.get("raw_amazon", "")
+
+                    st.markdown(f"**{name}**")
+                    st.markdown(f"- Color: **{color}**")
+                    st.markdown(f"- Price: **{price}**")
+                    if isinstance(url, str) and url.strip():
+                        st.markdown(f"[View on Amazon]({url})")
+
+            st.markdown("---")
+
 
 
 
