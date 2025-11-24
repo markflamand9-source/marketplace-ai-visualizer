@@ -16,7 +16,7 @@ st.set_page_config(
     page_icon="🧵",
 )
 
-# Softer background + tight top padding
+# Softer background, centered content, cleaned-up logo spacing
 st.markdown(
     """
     <style>
@@ -24,10 +24,19 @@ st.markdown(
         background-color: #f5f6fa;
     }
     .block-container {
-        padding-top: 0.2rem !important;
+        padding-top: 0.5rem !important;   /* small, safe gap from top */
         padding-bottom: 1.5rem;
         max-width: 1200px;
         margin: 0 auto;
+    }
+    /* Top logo only */
+    #top-logo img {
+        display: block;
+        margin-left: auto;
+        margin-right: auto;
+        margin-top: 0.75rem;              /* room above so it’s not cut */
+        margin-bottom: 0.4rem;            /* keeps title close but not jammed */
+        max-width: 320px;
     }
     </style>
     """,
@@ -37,14 +46,15 @@ st.markdown(
 
 # ================== HEADER WITH LOGO ==================
 
-# Centered logo (logo.png should be transparent & trimmed, in repo root)
-logo_cols = st.columns([1, 2, 1])
-with logo_cols[1]:
-    st.image("logo.png", use_column_width=False, width=260)
+with st.container():
+    st.markdown('<div id="top-logo">', unsafe_allow_html=True)
+    # logo.png should be the cropped/transparent logo in the repo root
+    st.image("logo.png")
+    st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown(
     """
-    <h1 style="text-align:center; margin-top:0.2rem; margin-bottom:0.1rem;">
+    <h1 style="text-align:center; margin-top:0.2rem; margin-bottom:0.15rem;">
         Market &amp; Place AI Stylist
     </h1>
     <p style="text-align:center; font-size:1.05rem; color:#555; margin-top:0;">
@@ -73,7 +83,6 @@ def get_openai_client() -> OpenAI:
     """Get OpenAI client using OPENAI_API_KEY from env or Streamlit secrets."""
     api_key = os.environ.get("OPENAI_API_KEY")
 
-    # try Streamlit secrets if env var not set
     try:
         if not api_key and "OPENAI_API_KEY" in st.secrets:
             api_key = st.secrets["OPENAI_API_KEY"]
@@ -113,7 +122,7 @@ except Exception as e:
     )
     st.stop()
 
-DESC_COL = None  # no separate description column
+DESC_COL = None  # there is no separate description column
 
 
 # ================== PRODUCT HELPERS ==================
@@ -138,7 +147,6 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
     ]
     wants_towel = any(t in q for t in towel_terms_in_query)
 
-    # towel-specific filter
     towel_pattern = "towel|bath sheet|washcloth|wash cloth"
 
     if wants_towel:
@@ -148,7 +156,6 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
         if not results.empty:
             return results.head(max_results)
 
-    # generic fallback search (name + color)
     mask_generic = (
         df["Product name"].fillna("").str.lower().str.contains(q)
         | df["Color"].fillna("").str.lower().str.contains(q)
@@ -175,7 +182,7 @@ def format_products_for_prompt(products: pd.DataFrame) -> str:
     return "\n\n".join(lines)
 
 
-# ================== OPENAI CALLS ==================
+# ================== OPENAI CALLS (TEXT) ==================
 
 def call_stylist_model(user_message: str, room_context: str,
                        products: pd.DataFrame) -> str:
@@ -228,6 +235,8 @@ You must follow these rules carefully:
         return f"❌ Error calling OpenAI chat model: `{e}`"
 
 
+# ================== OPENAI CALLS (IMAGES) ==================
+
 def generate_concept_image(
     room_description: str,
     products: pd.DataFrame,
@@ -236,26 +245,27 @@ def generate_concept_image(
     """
     Generate a visualization styled with Market & Place products.
 
-    Behavior:
-    - If a room image is provided: try a TRUE EDIT (images.edits) of that photo.
-      If the edit fails, we DO NOT fall back to a random concept – we just show
-      an error and return None.
-    - If NO room image is provided: generate a concept room from scratch.
+    BEHAVIOR:
+    - If a room image is provided:
+        * Use OpenAI images.edits on THAT PHOTO ONLY.
+        * Do NOT fall back to a random concept if editing fails.
+    - If NO room image is provided:
+        * Generate a new concept room from scratch.
     """
 
     top_names = ", ".join(products["Product name"].head(4).tolist())
 
     prompt_base = (
         "You are doing STRICT PHOTO EDITING for the brand Market & Place.\n"
-        "Your goal is to ONLY restyle TEXTILES while keeping the base room "
-        "architecture and furniture the same.\n\n"
-        "Non-negotiable rules:\n"
+        "Your job is to ONLY restyle TEXTILES while keeping the base room and "
+        "furniture exactly the same.\n\n"
+        "NON-NEGOTIABLE RULES:\n"
         "1. The room architecture, camera angle, bed shape, windows, doors, floor, "
         "   wall color, artwork, shelves, decor objects, plants, lamps, nightstands, "
         "   picture frames and all furniture MUST remain IDENTICAL.\n"
         "2. You may NOT move, resize, add, or remove furniture or decor items. Their "
         "   position, shape and style must stay the same.\n"
-        "3. You may NOT change wall color, lighting, perspective, or crop. It should "
+        "3. You may NOT change wall color, lighting, perspective, or crop. It must "
         "   look like the same photo.\n"
         "4. The ONLY things you may modify are TEXTILES:\n"
         "   - bedding (duvet, quilt, sheets, pillowcases, throws)\n"
@@ -263,15 +273,15 @@ def generate_concept_image(
         "   - blankets/throws\n"
         "   - curtains\n"
         "   - towels\n"
-        "5. Towels must appear only in realistic towel locations (bathroom racks, "
-        "   hooks, shelves, benches, or neatly folded). Do NOT put towels on the bed.\n"
+        "5. Towels must appear only in realistic towel locations: bathroom racks, "
+        "   hooks, shelves, benches, or neatly folded. Do NOT put towels on the bed.\n"
         "6. If a change would affect anything other than textiles, DO NOT make it.\n\n"
         "Restyle ONLY the textiles so they look like these Market & Place products: "
         f"{top_names}.\n"
     )
 
     try:
-        # If we have a base room image: attempt a true edit only
+        # ----- CASE 1: User uploaded a real room photo → TRUE EDIT ONLY -----
         if room_image_bytes is not None:
             prompt = (
                 prompt_base
@@ -294,14 +304,14 @@ def generate_concept_image(
             img = Image.open(io.BytesIO(image_bytes))
             return img
 
-        # No room image: concept render from scratch is allowed
+        # ----- CASE 2: No room photo → concept from scratch is allowed -----
         else:
             prompt = (
                 prompt_base
                 + "There is no base photo. Generate a NEW bedroom that showcases "
-                  "these textiles in a realistic way. Make sure towels, if used, "
-                  "are NOT on the bed."
+                  "these textiles in a realistic way. Do NOT place towels on the bed."
             )
+
             img_resp = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
@@ -313,8 +323,8 @@ def generate_concept_image(
             return img
 
     except Exception as e:
+        # For uploaded rooms we DO NOT fall back to a random room – we just show an error
         if room_image_bytes is not None:
-            # For uploaded room: fail rather than generate random room
             st.error(
                 "Could not generate an edited version of your room image. "
                 "The image API may not support this type of edit yet.\n\n"
@@ -369,14 +379,14 @@ with col_chat:
 
     products = st.session_state.last_products
     msgs = st.session_state.messages
-    rev_msgs = list(reversed(msgs))  # newest first
+    rev_msgs = list(reversed(msgs))  # newest first on top
 
     for i, msg in enumerate(rev_msgs):
         avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-        # Immediately under the newest AI message, show product cards
+        # Under the NEWEST AI message, show product cards
         if i == 0 and msg["role"] == "assistant":
             if products is not None and not products.empty:
                 st.markdown("#### Recommended products for this conversation")
@@ -424,9 +434,13 @@ with col_side:
 
     st.write(
         "Generates a **styled version of your uploaded room**, using Market & Place "
-        "products as inspiration. When a room photo is uploaded, the app only asks "
-        "the AI to edit that SAME room and change textiles. If the edit is not "
-        "supported, you will see an error instead of a random new room."
+        "products as inspiration.\n\n"
+        "- When you upload a room photo, the AI is instructed to **copy your room** "
+        "and **only change textiles** (bedding, pillows, throws, curtains, towels).\n"
+        "- It is explicitly told **not to move furniture, change walls, or put towels "
+        "on the bed**.\n"
+        "- If the edit is not supported by the image API, you will see an error instead "
+        "of a random new room."
     )
 
     uploaded_image = st.file_uploader(
@@ -534,6 +548,7 @@ with col_side:
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
+
 
 
 
