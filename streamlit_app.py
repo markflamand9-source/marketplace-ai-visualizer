@@ -1,26 +1,35 @@
 import os
-import base64
 import io
+import base64
+import requests
 
 import streamlit as st
 import pandas as pd
 from PIL import Image
-from openai import OpenAI
 
+# ==================== CONFIG ====================
 
-# ---------- PAGE CONFIG ----------
 st.set_page_config(
-    page_title="Market & Place AI Stylist",
+    page_title="Market & Place AI Stylist (Free)",
     layout="wide",
 )
 
-st.title("🧠🛋️ Market & Place AI Stylist")
+st.title("🧠🛋️ Market & Place AI Stylist (Free)")
 st.write(
-    "Chat with an AI stylist, search the Market & Place catalog, and get suggestions "
-    "for your room using your own product file."
+    "Powered by free HuggingFace models. Chat with an AI stylist, search the "
+    "Market & Place catalog, and generate concept visualizations."
 )
 
-# ---------- DATA LOADING ----------
+HF_API_KEY = os.getenv("HUGGINGFACE_API_KEY")  # set this in Streamlit secrets
+
+# Text model (chat/styling) – free tier
+HF_TEXT_MODEL = "meta-llama/Meta-Llama-3-8B-Instruct"
+# Image model (visualizer) – free tier
+HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+# ==================== DATA LOADING ====================
+
 @st.cache_data
 def load_data():
     return pd.read_excel("market_and_place_products.xlsx")
@@ -31,27 +40,89 @@ except Exception as e:
     st.error(
         "❌ Could not load `market_and_place_products.xlsx`.\n\n"
         "Make sure the file is in the repo root and has columns at least:\n"
-        "`Product name`, `Color`, `Price`, `raw_amazon`, and optionally `Image URL:` and `Description`."
+        "`Product name`, `Color`, `Price`, `raw_amazon`, and optionally "
+        "`Image URL:` and `Description`."
     )
     st.stop()
 
-# Normalize possible description column names
+# Normalise description column
 if "Description" in df.columns:
-    desc_col = "Description"
+    DESC_COL = "Description"
 elif "Product description" in df.columns:
-    desc_col = "Product description"
+    DESC_COL = "Product description"
 else:
-    desc_col = None  # no description column
+    DESC_COL = None
 
 
-# ---------- OPENAI CLIENT ----------
-api_key = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=api_key) if api_key else None
+# ==================== HUGGINGFACE HELPERS ====================
+
+def hf_text_completion(prompt: str) -> str:
+    """Call HuggingFace text model (Llama-3) to get a response."""
+    if not HF_API_KEY:
+        return (
+            "⚠️ HUGGINGFACE_API_KEY is not set. "
+            "Add it in Streamlit → Settings → Secrets."
+        )
+
+    url = f"https://api-inference.huggingface.co/models/{HF_TEXT_MODEL}"
+    headers = {"Authorization": f"Bearer {HF_API_KEY}"}
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "max_new_tokens": 400,
+            "temperature": 0.7,
+            "return_full_text": False,
+        },
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # HF sometimes returns list[ { "generated_text": ... } ]
+        if isinstance(data, list) and len(data) > 0:
+            item = data[0]
+            if isinstance(item, dict) and "generated_text" in item:
+                return item["generated_text"]
+
+        # Fallback: just convert to string
+        return str(data)
+
+    except Exception as e:
+        return f"❌ Error from HuggingFace text model: {e}"
 
 
-# ---------- PRODUCT SEARCH ----------
+def hf_image_from_prompt(prompt: str) -> Image.Image | None:
+    """Generate an image using Stable Diffusion XL via HuggingFace."""
+    if not HF_API_KEY:
+        st.warning(
+            "HUGGINGFACE_API_KEY is not set. Cannot generate images."
+        )
+        return None
+
+    url = f"https://api-inference.huggingface.co/models/{HF_IMAGE_MODEL}"
+    headers = {
+        "Authorization": f"Bearer {HF_API_KEY}",
+        "Accept": "image/png",
+    }
+    payload = {"inputs": prompt}
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        img_bytes = resp.content
+        img = Image.open(io.BytesIO(img_bytes))
+        return img
+    except Exception as e:
+        st.warning(f"Could not generate concept image: {e}")
+        return None
+
+
+# ==================== PRODUCT LOGIC ====================
+
 def find_relevant_products(user_query: str, max_results: int = 8) -> pd.DataFrame:
-    """Very simple keyword search over product name and color."""
+    """Simple keyword search over Product name and Color."""
     if not user_query:
         return df.head(max_results)
 
@@ -63,19 +134,17 @@ def find_relevant_products(user_query: str, max_results: int = 8) -> pd.DataFram
     )
 
     results = df[mask].copy()
-
     if results.empty:
-        # Fallback so AI still has something to work with
         results = df.sample(min(max_results, len(df)), random_state=0)
 
     return results.head(max_results)
 
 
 def format_products_for_prompt(products: pd.DataFrame) -> str:
-    """Compact text version of product list for the AI."""
+    """Compact text representation of products for the model."""
     lines = []
     for _, row in products.iterrows():
-        desc = row.get(desc_col, "") if desc_col else ""
+        desc = row.get(DESC_COL, "") if DESC_COL else ""
         line = (
             f"- Name: {row.get('Product name', '')}\n"
             f"  Color: {row.get('Color', '')}\n"
@@ -88,134 +157,105 @@ def format_products_for_prompt(products: pd.DataFrame) -> str:
     return "\n\n".join(lines)
 
 
-def call_ai_stylist(user_message: str, room_context: str, products: pd.DataFrame) -> str:
-    """Chat completion that recommends ONLY from given products."""
-    if client is None:
-        return (
-            "⚠️ AI is not configured.\n\n"
-            "Set your OpenAI API key as `OPENAI_API_KEY` in the app secrets."
-        )
-
+def ai_stylist_reply(user_message: str, room_context: str, products: pd.DataFrame) -> str:
+    """Use HF text model as stylist – ONLY recommends from provided products."""
     product_text = format_products_for_prompt(products)
 
-    system_prompt = """
-You are an interior stylist working for Market & Place.
+    system_instructions = """
+You are an interior stylist for Market & Place.
 
 RULES:
-- You ONLY recommend products from the list provided to you.
-- For each suggestion, clearly list:
+- You ONLY recommend products from the list provided.
+- For each suggestion, clearly show:
   • Product name
   • Color
   • Price
-  • Short description (from the data, or make a tasteful one if missing)
-  • Amazon URL (copy EXACTLY from the data, do not change it at all)
-- Group suggestions into a small, clear list (e.g. 3–5 items).
-- Use friendly, concise language like you're chatting with a customer.
+  • Short description (based on the data; invent tasteful text if missing)
+  • Amazon URL (copy EXACTLY as given, do not modify)
+- Group suggestions into a short, numbered list (3–5 items).
+- Use friendly, concise language as if chatting with a customer.
 """
 
     room_part = room_context or "The user did not describe the room."
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": (
-                f"User request:\n{user_message}\n\n"
-                f"Room description:\n{room_part}\n\n"
-                f"Here is the list of products you may choose from:\n\n{product_text}"
-            ),
-        },
-    ]
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4.1-mini",
-            messages=messages,
-            temperature=0.7,
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        return f"❌ Error calling AI: {e}"
-
-
-def generate_concept_image(room_description: str, products: pd.DataFrame) -> Image.Image | None:
-    """
-    Generate a concept visualization (not an exact edit of the uploaded photo,
-    but a photoreal render that matches the room + products).
-    """
-    if client is None:
-        return None
-
-    top_names = ", ".join(products["Product name"].head(3).tolist())
     prompt = (
-        "Photoreal interior design concept. "
-        f"Room details: {room_description or 'no description given'}. "
-        f"Style it using textile products similar to: {top_names} from Market & Place. "
-        "Soft natural lighting, high resolution."
+        system_instructions
+        + "\n\n"
+        + "User request:\n"
+        + user_message
+        + "\n\nRoom description:\n"
+        + room_part
+        + "\n\nYou may ONLY choose from these products:\n\n"
+        + product_text
+        + "\n\nNow respond with your suggestions."
     )
 
-    try:
-        img_resp = client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",
-        )
-        b64_data = img_resp.data[0].b64_json
-        image_bytes = base64.b64decode(b64_data)
-        img = Image.open(io.BytesIO(image_bytes))
-        return img
-    except Exception as e:
-        st.warning(f"Could not generate concept image: {e}")
-        return None
+    return hf_text_completion(prompt)
 
 
-# ---------- STREAMLIT STATE ----------
+def concept_prompt(room_description: str, products: pd.DataFrame) -> str:
+    """Build a prompt for Stable Diffusion XL."""
+    top_names = ", ".join(products["Product name"].head(3).tolist())
+    return (
+        "Photorealistic interior design concept, high resolution. "
+        f"Room details: {room_description or 'no description given'}. "
+        f"Style the room using textile products similar to: {top_names} from Market & Place. "
+        "Soft natural light, cozy but modern, realistic colours."
+    )
+
+
+# ==================== STREAMLIT STATE ====================
+
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # chat history
+    st.session_state.messages = []
 
 if "last_products" not in st.session_state:
-    st.session_state.last_products = df.head(4)  # default recommendations
+    st.session_state.last_products = df.head(4)
 
 if "room_description" not in st.session_state:
     st.session_state.room_description = ""
 
 
-# ---------- LAYOUT ----------
+# ==================== LAYOUT ====================
+
 col_chat, col_side = st.columns([2, 1])
 
-# ====== LEFT: CHAT WITH AI STYLIST ======
+# ----- LEFT: CHAT -----
 with col_chat:
     st.subheader("💬 Chat with the AI stylist")
 
-    # Show history
+    # show history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
-    # New user message
     user_input = st.chat_input(
         "Ask for ideas (e.g. 'neutral queen bedding under $80 for a small bright room')"
     )
 
     if user_input:
-        # Show user message immediately
-        st.session_state.messages.append({"role": "user", "content": user_input})
+        # store user msg
+        st.session_state.messages.append(
+            {"role": "user", "content": user_input}
+        )
 
-        # Choose candidate products based on query
+        # choose products
         candidate_products = find_relevant_products(user_input, max_results=8)
         st.session_state.last_products = candidate_products.copy()
 
-        # Use stored room description from the right column
+        # room context
         room_desc = st.session_state.room_description
 
-        # Call AI
-        ai_reply = call_ai_stylist(user_input, room_desc, candidate_products)
+        # AI reply
+        reply = ai_stylist_reply(user_input, room_desc, candidate_products)
 
-        st.session_state.messages.append({"role": "assistant", "content": ai_reply})
+        st.session_state.messages.append(
+            {"role": "assistant", "content": reply}
+        )
 
         st.rerun()
 
-# ====== RIGHT: ROOM + QUICK TOOLS ======
+# ----- RIGHT: ROOM + QUICK FILTER -----
 with col_side:
     st.subheader("🖼️ Your room")
 
@@ -235,7 +275,7 @@ with col_side:
     st.session_state.room_description = room_description
 
     st.markdown("---")
-    st.subheader("🔎 Quick catalog peek (optional)")
+    st.subheader("🔎 Quick catalog peek")
 
     quick_query = st.text_input("Filter products by keyword")
     if quick_query:
@@ -249,13 +289,9 @@ with col_side:
         height=250,
     )
 
-    st.caption(
-        "The AI stylist uses this same catalog behind the scenes when you chat."
-    )
-
 st.markdown("---")
 
-# ====== RECOMMENDED PRODUCTS SECTION ======
+# ----- AI-RECOMMENDED PRODUCTS -----
 st.subheader("⭐ AI-recommended products (from your catalog)")
 
 products = st.session_state.last_products
@@ -264,7 +300,8 @@ if products is not None and not products.empty:
     for _, row in products.iterrows():
         with st.container():
             cols = st.columns([1, 3])
-            # Image on left, info on right
+
+            # image
             with cols[0]:
                 img_url = row.get("Image URL:", "")
                 if isinstance(img_url, str) and img_url.strip():
@@ -275,38 +312,41 @@ if products is not None and not products.empty:
                 else:
                     st.empty()
 
+            # text info
             with cols[1]:
                 st.markdown(f"**{row.get('Product name', '')}**")
                 st.markdown(f"- Color: **{row.get('Color', '')}**")
                 st.markdown(f"- Price: **{row.get('Price', '')}**")
 
-                if desc_col:
-                    desc_val = row.get(desc_col, "")
+                if DESC_COL:
+                    desc_val = row.get(DESC_COL, "")
                     if isinstance(desc_val, str) and desc_val.strip():
                         st.markdown(f"- Description: {desc_val}")
 
                 url = row.get("raw_amazon", "")
                 if isinstance(url, str) and url.strip():
-                    # IMPORTANT: show Amazon URL exactly as-is
+                    # IMPORTANT: show Amazon URL EXACTLY as stored
                     st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
 else:
-    st.write("No products selected yet. Ask the stylist a question to see suggestions here.")
+    st.write("Ask the stylist something to see recommendations here.")
 
-# ====== CONCEPT VISUALIZER ======
-st.subheader("🎨 AI concept visualizer")
+# ----- CONCEPT VISUALIZER -----
+st.subheader("🎨 AI concept visualizer (FREE)")
 
 st.write(
-    "This generates a **concept image** of a room styled with Market & Place products "
-    "based on your room description and the current recommended products."
+    "Generates a **concept image** of a room styled with Market & Place products "
+    "based on your room description and current recommended products. "
+    "This uses free Stable Diffusion XL via HuggingFace."
 )
 
 if st.button("Generate concept image"):
-    with st.spinner("Asking AI to create a styled-room concept..."):
-        concept_img = generate_concept_image(st.session_state.room_description, products)
-        if concept_img is not None:
-            st.image(concept_img, caption="AI-generated style concept", use_column_width=False)
+    prompt = concept_prompt(st.session_state.room_description, products)
+    with st.spinner("Generating concept image with Stable Diffusion XL..."):
+        img = hf_image_from_prompt(prompt)
+        if img is not None:
+            st.image(img, caption="AI-generated style concept", use_column_width=False)
         else:
-            st.warning("Could not generate an image. Check your API key and try again.")
+            st.warning("Could not generate an image. Check your HuggingFace token.")
 
