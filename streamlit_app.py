@@ -160,40 +160,58 @@ You must follow these rules carefully:
             model="gpt-4.1-mini",
             messages=messages,
             temperature=0.7,
-            max_tokens=600,
+            max_tokens=700,
         )
         return response.choices[0].message.content
     except Exception as e:
         return f"❌ Error calling OpenAI chat model: `{e}`"
 
 
-def generate_concept_image(room_description: str,
-                           products: pd.DataFrame) -> Image.Image | None:
+def generate_concept_image(
+    room_description: str,
+    products: pd.DataFrame,
+    room_image_bytes: bytes | None = None,
+) -> Image.Image | None:
     """
-    Generate a concept visualization of a room styled with Market & Place
-    products. This is NOT a perfect edit of the uploaded photo; it’s a
-    photoreal concept based on the text description + product vibe.
+    Generate a concept visualization of the SAME room, styled with Market & Place
+    products. If a room image is provided, we use it as the base and ask the
+    model to keep layout and furniture, only changing textiles.
     """
-    top_names = ", ".join(products["Product name"].head(3).tolist())
+
+    top_names = ", ".join(products["Product name"].head(4).tolist())
     prompt = (
-        "Photorealistic interior design concept. "
-        f"Room details: {room_description or 'no description given'}. "
-        f"Style the space using textile products similar to: {top_names} "
-        "from Market & Place. Soft natural lighting, cozy modern atmosphere."
+        "You are editing a room photo for the brand Market & Place.\n"
+        "Keep the existing room architecture, furniture, windows, and perspective.\n"
+        "Only adjust BEDDING / TOWELS / TEXTILES to look like these Market & Place "
+        f"products: {top_names}.\n"
+        "Do NOT add extra furniture, decorations, or new windows. "
+        "Do NOT change the wall color unless it helps the textiles read clearly. "
+        "Final image should look photorealistic."
     )
 
     try:
-        img_resp = client.images.generate(
-            model="gpt-image-1",
-            prompt=prompt,
-            size="1024x1024",
-        )
+        kwargs = {
+            "model": "gpt-image-1",
+            "prompt": prompt,
+            "size": "1024x1024",
+        }
+
+        if room_image_bytes is not None:
+            b64_image = base64.b64encode(room_image_bytes).decode("utf-8")
+            # use uploaded room as base image
+            kwargs["image"] = b64_image
+
+        img_resp = client.images.generate(**kwargs)
         b64_data = img_resp.data[0].b64_json
         image_bytes = base64.b64decode(b64_data)
         img = Image.open(io.BytesIO(image_bytes))
         return img
     except Exception as e:
-        st.warning(f"Could not generate concept image: {e}")
+        st.warning(
+            "Could not generate concept image. "
+            "This can be due to org verification, billing, or API limits.\n\n"
+            f"Details: {e}"
+        )
         return None
 
 
@@ -208,12 +226,18 @@ if "last_products" not in st.session_state:
 if "room_description" not in st.session_state:
     st.session_state.room_description = ""
 
+if "uploaded_room_image_bytes" not in st.session_state:
+    st.session_state.uploaded_room_image_bytes = None
+
+if "concept_image_bytes" not in st.session_state:
+    st.session_state.concept_image_bytes = None
+
 
 # ================== LAYOUT ==================
 
-col_chat, col_side = st.columns([2, 1])
+col_chat, col_side = st.columns([2.2, 1.3])
 
-# ----- LEFT: CHAT -----
+# ----- LEFT: CHAT + PRODUCT IMAGES -----
 with col_chat:
     st.subheader("💬 Chat with the AI stylist")
 
@@ -244,16 +268,60 @@ with col_chat:
 
         st.rerun()
 
-# ----- RIGHT: ROOM + QUICK TOOLS -----
+    st.markdown("---")
+    st.subheader("⭐ AI-recommended products (from your catalog)")
+
+    products = st.session_state.last_products
+
+    if products is not None and not products.empty:
+        for _, row in products.iterrows():
+            with st.container():
+                cols = st.columns([1, 3])
+
+                # image
+                with cols[0]:
+                    img_url = row.get("Image URL:", "")
+                    if isinstance(img_url, str) and img_url.strip():
+                        try:
+                            st.image(img_url, use_column_width=True)
+                        except Exception:
+                            st.empty()
+                    else:
+                        st.empty()
+
+                # info
+                with cols[1]:
+                    st.markdown(f"**{row.get('Product name', '')}**")
+                    st.markdown(f"- Color: **{row.get('Color', '')}**")
+                    st.markdown(f"- Price: **{row.get('Price', '')}**")
+
+                    if DESC_COL:
+                        desc_val = row.get(DESC_COL, "")
+                        if isinstance(desc_val, str) and desc_val.strip():
+                            st.markdown(f"- Description: {desc_val}")
+
+                    url = row.get("raw_amazon", "")
+                    if isinstance(url, str) and url.strip():
+                        # IMPORTANT: show Amazon URL EXACTLY as stored
+                        st.markdown(f"[View on Amazon]({url})")
+
+                st.markdown("---")
+    else:
+        st.write("Ask the stylist a question to see recommendations here.")
+
+
+# ----- RIGHT: ROOM + CONCEPT VISUALIZER -----
 with col_side:
     st.subheader("🖼️ Your room")
 
     uploaded_image = st.file_uploader(
-        "Upload a photo of your room (optional, for reference only)",
+        "Upload a photo of your room (used as the base for styling)",
         type=["jpg", "jpeg", "png"],
     )
     if uploaded_image is not None:
-        st.image(uploaded_image, caption="Uploaded room (reference)", use_column_width=True)
+        img_bytes = uploaded_image.getvalue()
+        st.session_state.uploaded_room_image_bytes = img_bytes
+        st.image(uploaded_image, caption="Uploaded room", use_column_width=True)
 
     room_description = st.text_area(
         "Describe your room & what you want:",
@@ -263,9 +331,38 @@ with col_side:
     st.session_state.room_description = room_description
 
     st.markdown("---")
+    st.subheader("🎨 AI concept visualizer")
+
+    st.write(
+        "Generates a **styled version of your uploaded room**, using Market & Place "
+        "products as inspiration. The AI tries to keep layout/furniture the same and "
+        "only change textiles, but results are still generative – not perfect overlays."
+    )
+
+    if st.button("Generate concept image"):
+        with st.spinner("Asking OpenAI to restyle your room..."):
+            products = st.session_state.last_products
+            img = generate_concept_image(
+                st.session_state.room_description,
+                products,
+                st.session_state.uploaded_room_image_bytes,
+            )
+            if img is not None:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                st.session_state.concept_image_bytes = buf.getvalue()
+
+    if st.session_state.concept_image_bytes is not None:
+        st.image(
+            st.session_state.concept_image_bytes,
+            caption="AI-generated style concept",
+            use_column_width=True,
+        )
+
+    st.markdown("---")
     st.subheader("🔎 Quick catalog peek")
 
-    quick_query = st.text_input("Filter products by keyword")
+    quick_query = st.text_input("Filter products by keyword", key="quick_query")
     if quick_query:
         preview = find_relevant_products(quick_query, max_results=10)
     else:
@@ -277,66 +374,5 @@ with col_side:
         height=250,
     )
 
-st.markdown("---")
-
-# ----- PRODUCT CARDS -----
-st.subheader("⭐ AI-recommended products (from your catalog)")
-
-products = st.session_state.last_products
-
-if products is not None and not products.empty:
-    for _, row in products.iterrows():
-        with st.container():
-            cols = st.columns([1, 3])
-
-            # image
-            with cols[0]:
-                img_url = row.get("Image URL:", "")
-                if isinstance(img_url, str) and img_url.strip():
-                    try:
-                        st.image(img_url, use_column_width=True)
-                    except Exception:
-                        st.empty()
-                else:
-                    st.empty()
-
-            # info
-            with cols[1]:
-                st.markdown(f"**{row.get('Product name', '')}**")
-                st.markdown(f"- Color: **{row.get('Color', '')}**")
-                st.markdown(f"- Price: **{row.get('Price', '')}**")
-
-                if DESC_COL:
-                    desc_val = row.get(DESC_COL, "")
-                    if isinstance(desc_val, str) and desc_val.strip():
-                        st.markdown(f"- Description: {desc_val}")
-
-                url = row.get("raw_amazon", "")
-                if isinstance(url, str) and url.strip():
-                    # IMPORTANT: show Amazon URL EXACTLY as stored
-                    st.markdown(f"[View on Amazon]({url})")
-
-            st.markdown("---")
-else:
-    st.write("Ask the stylist a question to see recommendations here.")
-
-# ----- CONCEPT VISUALIZER -----
-st.subheader("🎨 AI concept visualizer")
-
-st.write(
-    "Generate a **concept image** of a room styled with Market & Place "
-    "products based on your room description and the current recommended products."
-)
-
-if st.button("Generate concept image"):
-    with st.spinner("Asking OpenAI to create a styled-room concept..."):
-        concept_img = generate_concept_image(
-            st.session_state.room_description,
-            products,
-        )
-        if concept_img is not None:
-            st.image(concept_img, caption="AI-generated style concept", use_column_width=False)
-        else:
-            st.warning("Could not generate an image. Check your API key and billing.")
 
 
