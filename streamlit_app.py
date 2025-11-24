@@ -16,7 +16,7 @@ st.set_page_config(
     page_icon="🧵",
 )
 
-# Global styling: soft background + nicer padding
+# Global styling: softer background + **condensed top padding**
 st.markdown(
     """
     <style>
@@ -24,9 +24,10 @@ st.markdown(
         background-color: #f5f6fa;
     }
     .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
+        padding-top: 0.6rem !important;   /* tighter gap at very top */
+        padding-bottom: 1.5rem;
         max-width: 1200px;
+        margin: 0 auto;
     }
     </style>
     """,
@@ -36,14 +37,14 @@ st.markdown(
 
 # ================== HEADER WITH LOGO ==================
 
-# Centered logo (logo.png must be in repo root)
+# Centered logo (logo.png should be your transparent version in the repo root)
 logo_cols = st.columns([1, 2, 1])
 with logo_cols[1]:
-    st.image("logo.png", use_column_width=False)
+    st.image("logo.png", use_column_width=False, width=260)
 
 st.markdown(
     """
-    <h1 style="text-align:center; margin-top:0.5rem; margin-bottom:0.2rem;">
+    <h1 style="text-align:center; margin-top:0.3rem; margin-bottom:0.15rem;">
         Market &amp; Place AI Stylist
     </h1>
     <p style="text-align:center; font-size:1.05rem; color:#555;">
@@ -541,6 +542,7 @@ with col_side:
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
+
 
 
 
