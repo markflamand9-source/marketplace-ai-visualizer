@@ -569,6 +569,131 @@ with col_side:
 
             st.markdown("---")
 
+def generate_concept_image(
+    room_description: str,
+    products: pd.DataFrame,
+    room_image_bytes: bytes | None = None,
+    last_query: str = "",
+) -> Image.Image | None:
+    """
+    Generate a concept visualization styled with Market & Place products.
+
+    IMPORTANT LIMITATION:
+    - The current Images API (gpt-image-1 via images.generate) cannot *edit* the
+      uploaded photo pixels. It always creates a new image.
+    - We therefore use a very strict prompt to:
+        * keep the same TYPE of room (bathroom stays bathroom, bedroom stays bedroom)
+        * strongly imitate the uploaded room layout
+        * only restyle textiles
+        * mimic Market & Place products in color/pattern as closely as possible.
+    """
+
+    # ---------- Infer room type (bathroom vs bedroom vs generic) ----------
+    room_type = infer_room_type(room_description, last_query, products)
+
+    # ---------- Build detailed product summary for the prompt ----------
+    if products is None or products.empty:
+        product_summary = "No specific products listed – use generic Market & Place style textiles."
+    else:
+        lines = []
+        for _, row in products.head(6).iterrows():
+            name = str(row.get("Product name", "")).strip()
+            color = str(row.get("Color", "")).strip()
+            price = str(row.get("Price", "")).strip()
+            line = f"- {name} (color: {color}, price: {price})"
+            lines.append(line)
+        product_summary = "\n".join(lines)
+
+    # ---------- Hard rules for ALL rooms ----------
+    base_rules = (
+        "You are an interior design image generator for the home-textile brand "
+        "Market & Place.\n\n"
+        "ABSOLUTE, NON-NEGOTIABLE RULES (YOU MUST OBEY ALL OF THESE):\n"
+        "1. You must keep the SAME TYPE of room as described (bathroom vs bedroom).\n"
+        "2. Imagine a room that looks as close as possible to the user's real room: "
+        "   same kind of layout, fixtures, and overall vibe.\n"
+        "3. You MUST NOT change architecture (walls, windows, doors), the vanity, "
+        "   toilet, shower, or major furniture shapes. They should look almost the same.\n"
+        "4. You MUST ONLY change TEXTILES:\n"
+        "   - bedding (comforter, quilt, duvet, sheets, pillowcases, decorative pillows)\n"
+        "   - blankets/throws\n"
+        "   - curtains/shower curtains\n"
+        "   - towels and bath rugs (ONLY if it is a bathroom).\n"
+        "5. Towels must ONLY appear in realistic towel locations: racks, hooks, "
+        "   shelves, benches, or neatly folded in a bathroom. NEVER put towels on a bed.\n"
+        "6. Do not add or remove furniture, mirrors, sinks, toilets, showers, or art. "
+        "   Only textiles can change.\n"
+        "7. All textiles should look like real Market & Place products, and should "
+        "   closely match the specific products listed below in color and pattern.\n"
+        "8. The final image should look like a natural, realistic photo, NOT a CGI render.\n\n"
+        "MARKET & PLACE PRODUCTS TO MIMIC IN THE TEXTILES (COLORS & PATTERNS):\n"
+        f"{product_summary}\n\n"
+    )
+
+    # ---------- Room-type specific block ----------
+    if room_type == "bathroom":
+        room_type_block = (
+            "ROOM TYPE: BATHROOM\n"
+            "The generated image MUST clearly be a bathroom.\n"
+            "- Show bathroom fixtures like a shower or tub, sink/vanity, toilet, tiled walls or floor.\n"
+            "- You MUST NOT show any kind of bed, sofa, or bedroom furniture.\n"
+            "- Focus textile changes on: shower curtain, towels, bath rugs/mats.\n\n"
+        )
+    elif room_type == "bedroom":
+        room_type_block = (
+            "ROOM TYPE: BEDROOM\n"
+            "The generated image MUST clearly be a bedroom with a bed as the main furniture.\n"
+            "- You MUST NOT show a toilet, shower, or bathroom fixtures.\n"
+            "- Focus textile changes on: duvet/comforter, pillows, sheets, throws, and curtains.\n\n"
+        )
+    else:
+        room_type_block = (
+            "ROOM TYPE: GENERIC LIVING SPACE\n"
+            "Keep the same general type of room as described by the user. Do not convert "
+            "it into a bathroom or bedroom unless it obviously is one from the description.\n\n"
+        )
+
+    # ---------- Uploaded-photo context ----------
+    if room_image_bytes is not None:
+        upload_context = (
+            "The user has uploaded a photo of their real room. You cannot directly edit "
+            "that photo, but you MUST imagine a room that looks almost identical in layout "
+            "and fixtures, only changing the textiles to the Market & Place options.\n\n"
+        )
+    else:
+        upload_context = (
+            "The user did NOT upload a photo. Create a realistic room that matches the "
+            "description, then apply the textile rules above.\n\n"
+        )
+
+    desc_text = room_description or "No extra room description was provided."
+
+    prompt = (
+        base_rules
+        + room_type_block
+        + upload_context
+        + "USER ROOM DESCRIPTION:\n"
+        + desc_text
+    )
+
+    try:
+        img_resp = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024",
+        )
+
+        b64_data = img_resp.data[0].b64_json
+        image_bytes = base64.b64decode(b64_data)
+        img = Image.open(io.BytesIO(image_bytes))
+        return img
+
+    except Exception as e:
+        st.error(
+            "Could not generate a concept image with the current image API.\n\n"
+            f"Technical details: {e}"
+        )
+        return None
 
 
 
