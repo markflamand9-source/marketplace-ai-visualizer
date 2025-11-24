@@ -16,7 +16,7 @@ st.set_page_config(
     page_icon="🧵",
 )
 
-# Global styling: softer background + **condensed top padding**
+# Softer background + tight top padding
 st.markdown(
     """
     <style>
@@ -24,7 +24,7 @@ st.markdown(
         background-color: #f5f6fa;
     }
     .block-container {
-        padding-top: 0.6rem !important;   /* tighter gap at very top */
+        padding-top: 0.2rem !important;
         padding-bottom: 1.5rem;
         max-width: 1200px;
         margin: 0 auto;
@@ -37,17 +37,17 @@ st.markdown(
 
 # ================== HEADER WITH LOGO ==================
 
-# Centered logo (logo.png should be your transparent version in the repo root)
+# Centered logo (logo.png should be transparent & trimmed, in repo root)
 logo_cols = st.columns([1, 2, 1])
 with logo_cols[1]:
     st.image("logo.png", use_column_width=False, width=260)
 
 st.markdown(
     """
-    <h1 style="text-align:center; margin-top:0.3rem; margin-bottom:0.15rem;">
+    <h1 style="text-align:center; margin-top:0.2rem; margin-bottom:0.1rem;">
         Market &amp; Place AI Stylist
     </h1>
-    <p style="text-align:center; font-size:1.05rem; color:#555;">
+    <p style="text-align:center; font-size:1.05rem; color:#555; margin-top:0;">
         Chat with an AI stylist, search the Market &amp; Place catalog, and generate
         concept visualizations using your own product file.
     </p>
@@ -113,8 +113,7 @@ except Exception as e:
     )
     st.stop()
 
-# There is no dedicated description column in this file.
-DESC_COL = None
+DESC_COL = None  # no separate description column
 
 
 # ================== PRODUCT HELPERS ==================
@@ -132,7 +131,6 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
 
     q = query.lower()
 
-    # detect towel intent
     towel_terms_in_query = [
         "towel", "towels", "bath towel", "bath towels",
         "hand towel", "hand towels", "washcloth", "wash cloth",
@@ -147,8 +145,6 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
         name_series = df["Product name"].fillna("").str.lower()
         mask_towel = name_series.str.contains(towel_pattern)
         results = df[mask_towel].copy()
-
-        # if we actually have towels, return those first
         if not results.empty:
             return results.head(max_results)
 
@@ -159,7 +155,6 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
     )
     results = df[mask_generic].copy()
 
-    # fallback so AI always has something
     if results.empty:
         results = df.sample(min(max_results, len(df)), random_state=0)
 
@@ -239,43 +234,51 @@ def generate_concept_image(
     room_image_bytes: bytes | None = None,
 ) -> Image.Image | None:
     """
-    Try to generate a concept visualization of the SAME room, styled with
-    Market & Place products.
+    Generate a visualization styled with Market & Place products.
 
-    We FIRST attempt a true image edit (using the uploaded room photo).
-    If the API / SDK does not support edits, we fall back to a pure
-    concept render and warn the user.
+    Behavior:
+    - If a room image is provided: try a TRUE EDIT (images.edits) of that photo.
+      If the edit fails, we DO NOT fall back to a random concept – we just show
+      an error and return None.
+    - If NO room image is provided: generate a concept room from scratch.
     """
 
     top_names = ", ".join(products["Product name"].head(4).tolist())
-    # ultra-strict "nuclear" instruction
-    prompt = (
+
+    prompt_base = (
         "You are doing STRICT PHOTO EDITING for the brand Market & Place.\n"
-        "You receive a real photo of a bedroom. Your job is ONLY to restyle "
-        "TEXTILES in that exact photo. Follow these rules as NON-NEGOTIABLE HARD "
-        "CONSTRAINTS:\n\n"
+        "Your goal is to ONLY restyle TEXTILES while keeping the base room "
+        "architecture and furniture the same.\n\n"
+        "Non-negotiable rules:\n"
         "1. The room architecture, camera angle, bed shape, windows, doors, floor, "
         "   wall color, artwork, shelves, decor objects, plants, lamps, nightstands, "
         "   picture frames and all furniture MUST remain IDENTICAL.\n"
-        "2. You are NOT allowed to move, resize, add, or remove any furniture or "
-        "   decor items. Their position, shape and style must stay the same.\n"
-        "3. You are NOT allowed to change the wall color, lighting, perspective, "
-        "   or crop. The photo should look like the same camera shot.\n"
-        "4. The ONLY things you are allowed to modify are TEXTILES:\n"
+        "2. You may NOT move, resize, add, or remove furniture or decor items. Their "
+        "   position, shape and style must stay the same.\n"
+        "3. You may NOT change wall color, lighting, perspective, or crop. It should "
+        "   look like the same photo.\n"
+        "4. The ONLY things you may modify are TEXTILES:\n"
         "   - bedding (duvet, quilt, sheets, pillowcases, throws)\n"
         "   - decorative pillows\n"
         "   - blankets/throws\n"
         "   - curtains\n"
         "   - towels\n"
-        "5. If a change would affect anything other than textiles, DO NOT make it.\n\n"
+        "5. Towels must appear only in realistic towel locations (bathroom racks, "
+        "   hooks, shelves, benches, or neatly folded). Do NOT put towels on the bed.\n"
+        "6. If a change would affect anything other than textiles, DO NOT make it.\n\n"
         "Restyle ONLY the textiles so they look like these Market & Place products: "
         f"{top_names}.\n"
-        "Everything else must be left exactly as in the original photo."
     )
 
     try:
+        # If we have a base room image: attempt a true edit only
         if room_image_bytes is not None:
-            # Try a true edit of the uploaded room photo
+            prompt = (
+                prompt_base
+                + "Use the uploaded room photo as the base image. Copy the room "
+                  "layout exactly and only update the textiles as described."
+            )
+
             img_file = io.BytesIO(room_image_bytes)
             img_file.name = "room.png"
 
@@ -285,28 +288,20 @@ def generate_concept_image(
                 prompt=prompt,
                 size="1024x1024",
             )
+
+            b64_data = img_resp.data[0].b64_json
+            image_bytes = base64.b64decode(b64_data)
+            img = Image.open(io.BytesIO(image_bytes))
+            return img
+
+        # No room image: concept render from scratch is allowed
         else:
-            # No base image: fall back to concept (brand-new room)
-            img_resp = client.images.generate(
-                model="gpt-image-1",
-                prompt=prompt,
-                size="1024x1024",
+            prompt = (
+                prompt_base
+                + "There is no base photo. Generate a NEW bedroom that showcases "
+                  "these textiles in a realistic way. Make sure towels, if used, "
+                  "are NOT on the bed."
             )
-
-        b64_data = img_resp.data[0].b64_json
-        image_bytes = base64.b64decode(b64_data)
-        img = Image.open(io.BytesIO(image_bytes))
-        return img
-
-    except Exception as e:
-        # If edits() isn't available in the SDK or fails, we warn and fall back
-        st.warning(
-            "Could not perform a true photo edit on your room image. "
-            "Your OpenAI setup may not support image edits yet, so the result "
-            "below might be a brand-new concept room instead of your exact photo.\n\n"
-            f"Technical details: {e}"
-        )
-        try:
             img_resp = client.images.generate(
                 model="gpt-image-1",
                 prompt=prompt,
@@ -316,15 +311,24 @@ def generate_concept_image(
             image_bytes = base64.b64decode(b64_data)
             img = Image.open(io.BytesIO(image_bytes))
             return img
-        except Exception as e2:
-            st.error(f"Image generation also failed: {e2}")
-            return None
+
+    except Exception as e:
+        if room_image_bytes is not None:
+            # For uploaded room: fail rather than generate random room
+            st.error(
+                "Could not generate an edited version of your room image. "
+                "The image API may not support this type of edit yet.\n\n"
+                f"Technical details: {e}"
+            )
+        else:
+            st.error(f"Image generation failed: {e}")
+        return None
 
 
 # ================== STREAMLIT STATE ==================
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []   # chat history
+    st.session_state.messages = []
 
 if "last_products" not in st.session_state:
     st.session_state.last_products = df.head(4)
@@ -342,17 +346,13 @@ if "concept_image_bytes" not in st.session_state:
 # ================== HANDLE TOP SEARCH / CHAT SUBMIT ==================
 
 if submitted and user_input:
-    # user message
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # pick candidate products for this question
     candidate_products = find_relevant_products(user_input, max_results=6)
     st.session_state.last_products = candidate_products.copy()
 
-    # use stored room description from right column
     room_desc = st.session_state.room_description
 
-    # AI reply
     reply = call_stylist_model(user_input, room_desc, candidate_products)
     st.session_state.messages.append({"role": "assistant", "content": reply})
 
@@ -369,16 +369,14 @@ with col_chat:
 
     products = st.session_state.last_products
     msgs = st.session_state.messages
-    rev_msgs = list(reversed(msgs))  # newest first for display
+    rev_msgs = list(reversed(msgs))  # newest first
 
-    # Show newest conversation at the top,
-    # and put the product cards right under the newest AI answer.
     for i, msg in enumerate(rev_msgs):
         avatar = "🙂" if msg["role"] == "user" else "🧵"
         with st.chat_message(msg["role"], avatar=avatar):
             st.markdown(msg["content"])
 
-        # Immediately under the newest AI message, show the product cards
+        # Immediately under the newest AI message, show product cards
         if i == 0 and msg["role"] == "assistant":
             if products is not None and not products.empty:
                 st.markdown("#### Recommended products for this conversation")
@@ -387,7 +385,6 @@ with col_chat:
                     with st.container():
                         cols = st.columns([1, 3])
 
-                        # image
                         with cols[0]:
                             img_url = row.get("Image URL:", "")
                             if isinstance(img_url, str) and img_url.strip():
@@ -398,7 +395,6 @@ with col_chat:
                             else:
                                 st.empty()
 
-                        # info + light description
                         with cols[1]:
                             name = row.get("Product name", "")
                             color = row.get("Color", "")
@@ -428,9 +424,9 @@ with col_side:
 
     st.write(
         "Generates a **styled version of your uploaded room**, using Market & Place "
-        "products as inspiration. The AI is instructed to keep layout/furniture the "
-        "same and only change textiles. If image edits are not supported in your "
-        "OpenAI setup, results may be a new concept room instead of an exact edit."
+        "products as inspiration. When a room photo is uploaded, the app only asks "
+        "the AI to edit that SAME room and change textiles. If the edit is not "
+        "supported, you will see an error instead of a random new room."
     )
 
     uploaded_image = st.file_uploader(
@@ -469,7 +465,6 @@ with col_side:
             use_column_width=True,
         )
 
-        # 🔹 Products used in this concept (shop the look)
         st.markdown("#### Products used in this concept")
 
         concept_products = st.session_state.last_products
@@ -478,7 +473,6 @@ with col_side:
                 with st.container():
                     cols = st.columns([1, 3])
 
-                    # product image
                     with cols[0]:
                         img_url = row.get("Image URL:", "")
                         if isinstance(img_url, str) and img_url.strip():
@@ -489,7 +483,6 @@ with col_side:
                         else:
                             st.empty()
 
-                    # product info + link
                     with cols[1]:
                         name = row.get("Product name", "")
                         color = row.get("Color", "")
@@ -500,7 +493,6 @@ with col_side:
                         st.markdown(f"- Color: **{color}**")
                         st.markdown(f"- Price: **{price}**")
                         if isinstance(url, str) and url.strip():
-                            # IMPORTANT: Amazon URL exactly as stored
                             st.markdown(f"[View on Amazon]({url})")
 
                 st.markdown("---")
@@ -542,6 +534,7 @@ with col_side:
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
+
 
 
 
