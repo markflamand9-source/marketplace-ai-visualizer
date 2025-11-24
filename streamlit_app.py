@@ -39,9 +39,10 @@ st.markdown(
 # Spacer to drop the logo down a bit from the very top
 st.markdown("<div style='height:2.5rem;'></div>", unsafe_allow_html=True)
 
-# 3 columns: put logo in middle one so it's truly centered
+# 3 columns: put logo in the middle one so it's truly centered
 logo_cols = st.columns([1, 2, 1])
 with logo_cols[1]:
+    # logo.png should be in the repo root
     st.image("logo.png", use_column_width=False)
 
 # Small spacer between logo and title
@@ -59,6 +60,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
 # ================== ASK-THE-STYLIST SEARCH BAR ==================
 
@@ -143,6 +145,7 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
     ]
     wants_towel = any(t in q for t in towel_terms_in_query)
 
+    # Look for towel-like products in the name
     towel_pattern = "towel|bath sheet|washcloth|wash cloth"
 
     if wants_towel:
@@ -152,13 +155,14 @@ def find_relevant_products(query: str, max_results: int = 6) -> pd.DataFrame:
         if not results.empty:
             return results.head(max_results)
 
+    # Generic keyword search
     mask_generic = (
         df["Product name"].fillna("").str.lower().str.contains(q)
         | df["Color"].fillna("").str.lower().str.contains(q)
     )
     results = df[mask_generic].copy()
 
-    # fallback so AI always has something
+    # Fallback so AI always has something
     if results.empty:
         results = df.sample(min(max_results, len(df)), random_state=0)
 
@@ -240,95 +244,80 @@ def generate_concept_image(
     room_image_bytes: bytes | None = None,
 ) -> Image.Image | None:
     """
-    Generate a visualization styled with Market & Place products.
+    Generate a concept visualization styled with Market & Place products.
 
-    BEHAVIOR:
-    - If a room image is provided:
-        * Use OpenAI images.edits on THAT PHOTO ONLY.
-        * Do NOT fall back to a random concept if editing fails.
-    - If NO room image is provided:
-        * Generate a new concept room from scratch.
+    NOTE:
+    - The current Images API only supports `images.generate` (no `edits`).
+    - We therefore use a very strict prompt that tells the model to:
+        * keep the same room layout / architecture
+        * only change textiles
+        * never put towels on the bed
+    - If a photo is uploaded, we tell the model to imagine that same room and restyle
+      the textiles; the actual photo is used for the user preview, not as an edit base.
     """
 
-    top_names = ", ".join(products["Product name"].head(4).tolist())
+    if products is None or products.empty:
+        product_names = "the available Market & Place textiles"
+    else:
+        product_names = ", ".join(products["Product name"].head(4).tolist())
 
-    prompt_base = (
-        "You are doing STRICT PHOTO EDITING for the brand Market & Place.\n"
-        "Your job is to ONLY restyle TEXTILES while keeping the base room and "
-        "furniture exactly the same.\n\n"
+    base_rules = (
+        "You are an interior design image generator for the brand Market & Place.\n\n"
         "NON-NEGOTIABLE RULES:\n"
-        "1. The room architecture, camera angle, bed shape, windows, doors, floor, "
-        "   wall color, artwork, shelves, decor objects, plants, lamps, nightstands, "
-        "   picture frames and all furniture MUST remain IDENTICAL.\n"
-        "2. You may NOT move, resize, add, or remove furniture or decor items. Their "
-        "   position, shape and style must stay the same.\n"
-        "3. You may NOT change wall color, lighting, perspective, or crop. It must "
-        "   look like the same photo.\n"
-        "4. The ONLY things you may modify are TEXTILES:\n"
-        "   - bedding (duvet, quilt, sheets, pillowcases, throws)\n"
-        "   - decorative pillows\n"
+        "1. Imagine the SAME room as the user's real room: same layout, walls, "
+        "   windows, bed position, furniture positions, decor objects, lighting, "
+        "   and camera angle.\n"
+        "2. You MUST NOT change the architecture, wall colors, furniture style, "
+        "   floor, decor, or perspective.\n"
+        "3. You MUST ONLY change TEXTILES:\n"
+        "   - bedding (comforter, quilt, duvet, sheets, pillowcases, decorative pillows)\n"
         "   - blankets/throws\n"
         "   - curtains\n"
-        "   - towels\n"
-        "5. Towels must appear only in realistic towel locations: bathroom racks, "
-        "   hooks, shelves, benches, or neatly folded. Do NOT put towels on the bed.\n"
-        "6. If a change would affect anything other than textiles, DO NOT make it.\n\n"
-        "Restyle ONLY the textiles so they look like these Market & Place products: "
-        f"{top_names}.\n"
+        "   - towels and bath rugs (ONLY if the room is clearly a bathroom).\n"
+        "4. Towels must ONLY appear in realistic towel locations: racks, hooks, "
+        "   shelves, benches, or neatly folded in a bathroom. NEVER put towels on the bed.\n"
+        "5. Do not add or remove furniture, art, plants, or other objects.\n"
+        "6. The final image should look like a natural, realistic photo.\n\n"
+        f"Use these Market & Place products as inspiration for the textiles: {product_names}.\n\n"
+    )
+
+    if room_image_bytes is not None:
+        room_context = (
+            "The user has uploaded a photo of their room. Recreate that same room "
+            "as closely as possible and only restyle the textiles.\n\n"
+        )
+    else:
+        room_context = (
+            "The user did NOT upload a photo. Create a realistic room that matches "
+            "their description, then apply the textile rules above.\n\n"
+        )
+
+    desc_text = room_description or "No extra room description was provided."
+
+    prompt = (
+        base_rules
+        + room_context
+        + "USER ROOM DESCRIPTION:\n"
+        + desc_text
     )
 
     try:
-        # ----- CASE 1: User uploaded a real room photo → TRUE EDIT ONLY -----
-        if room_image_bytes is not None:
-            prompt = (
-                prompt_base
-                + "Use the uploaded room photo as the base image. Copy the room "
-                  "layout exactly and only update the textiles as described."
-            )
+        img_resp = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1024x1024",
+        )
 
-            img_file = io.BytesIO(room_image_bytes)
-            img_file.name = "room.png"
-
-            img_resp = client.images.edits(
-                model="gpt-image-1",
-                image=img_file,
-                prompt=prompt,
-                size="1024x1024",
-            )
-
-            b64_data = img_resp.data[0].b64_json
-            image_bytes = base64.b64decode(b64_data)
-            img = Image.open(io.BytesIO(image_bytes))
-            return img
-
-        # ----- CASE 2: No room photo → concept from scratch is allowed -----
-        else:
-            prompt = (
-                prompt_base
-                + "There is no base photo. Generate a NEW bedroom that showcases "
-                  "these textiles in a realistic way. Do NOT place towels on the bed."
-            )
-
-            img_resp = client.images.generate(
-                model="gpt-image-1",
-                prompt=prompt,
-                size="1024x1024",
-            )
-            b64_data = img_resp.data[0].b64_json
-            image_bytes = base64.b64decode(b64_data)
-            img = Image.open(io.BytesIO(image_bytes))
-            return img
+        b64_data = img_resp.data[0].b64_json
+        image_bytes = base64.b64decode(b64_data)
+        img = Image.open(io.BytesIO(image_bytes))
+        return img
 
     except Exception as e:
-        # For uploaded rooms we DO NOT fall back to a random room – we just show an error
-        if room_image_bytes is not None:
-            st.error(
-                "Could not generate an edited version of your room image. "
-                "The image API may not support this type of edit yet.\n\n"
-                f"Technical details: {e}"
-            )
-        else:
-            st.error(f"Image generation failed: {e}")
+        st.error(
+            "Could not generate a concept image with the current image API.\n\n"
+            f"Technical details: {e}"
+        )
         return None
 
 
@@ -429,18 +418,18 @@ with col_side:
     st.subheader("🛏️ AI concept visualizer")
 
     st.write(
-        "Generates a **styled version of your uploaded room**, using Market & Place "
+        "Generates a **styled version of your room**, using Market & Place "
         "products as inspiration.\n\n"
-        "- When you upload a room photo, the AI is instructed to **copy your room** "
-        "and **only change textiles** (bedding, pillows, throws, curtains, towels).\n"
+        "- The AI is instructed to **copy your room layout** and **only change textiles** "
+        "(bedding, pillows, throws, curtains, towels/bath rugs).\n"
         "- It is explicitly told **not to move furniture, change walls, or put towels "
         "on the bed**.\n"
-        "- If the edit is not supported by the image API, you will see an error instead "
-        "of a random new room."
+        "- Because the current image API does not support direct photo editing, it "
+        "recreates the room based on your description and these rules."
     )
 
     uploaded_image = st.file_uploader(
-        "Upload a photo of your room (used as the base for styling where possible)",
+        "Upload a photo of your room (for the AI to imitate the layout & for preview)",
         type=["jpg", "jpeg", "png"],
     )
     if uploaded_image is not None:
@@ -544,6 +533,7 @@ with col_side:
                         st.markdown(f"[View on Amazon]({url})")
 
             st.markdown("---")
+
 
 
 
