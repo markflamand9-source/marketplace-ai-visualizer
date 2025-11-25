@@ -1,4 +1,5 @@
 import base64
+import io
 import os
 from typing import List, Tuple, Optional
 
@@ -6,7 +7,9 @@ import pandas as pd
 import streamlit as st
 from openai import OpenAI
 
-# ---------- CONFIG ----------
+# ---------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------
 
 st.set_page_config(
     page_title="Market & Place AI Stylist",
@@ -19,18 +22,20 @@ OPENAI_MODEL_IMAGE = "gpt-image-1"
 
 client = OpenAI()
 
-DATA_PATH = "market_and_place_products.xlsx"  # Excel in repo
-LOGO_PATH = "logo.png"                        # Brand logo in repo
-STORE_SHELF_REFERENCE = "store shelf.jpg"     # Reference shelf photo in repo
+DATA_PATH = "market_and_place_products.xlsx"
+LOGO_PATH = "logo.png"
+STORE_SHELF_PHOTO = "store shelf.jpg"  # your reference shelf photo in repo root
 
+# ---------------------------------------------------------
+# DATA LOADING
+# ---------------------------------------------------------
 
-# ---------- DATA LOADING ----------
 
 @st.cache_data(show_spinner=False)
 def load_catalog(path: str) -> pd.DataFrame:
-    """Load and standardise the Market & Place catalog."""
     df = pd.read_excel(path)
 
+    # Normalise / rename common columns
     df = df.rename(
         columns={
             "Product name": "name",
@@ -39,15 +44,23 @@ def load_catalog(path: str) -> pd.DataFrame:
             "raw_amazon": "amazon",
             "Image URL:": "image_url",
             "Category": "category",
+            "category": "category",
+            "Image file": "image_file",
+            "Image File": "image_file",
+            "Local image file": "image_file",
         }
     )
 
-    # Safety: ensure strings
-    for col in ["name", "color", "amazon", "image_url", "category"]:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
+    # Ensure expected columns exist
+    for col in ["name", "color", "price", "amazon", "image_url", "category", "image_file"]:
+        if col not in df.columns:
+            df[col] = ""
 
-    # Helper columns for simple search
+    # Make sure strings where appropriate
+    for col in ["name", "color", "amazon", "image_url", "category", "image_file"]:
+        df[col] = df[col].astype(str).fillna("")
+
+    # Helper lowercase columns for search
     df["name_lower"] = df["name"].str.lower()
     df["color_lower"] = df["color"].str.lower()
     df["category_lower"] = df["category"].str.lower()
@@ -57,21 +70,28 @@ def load_catalog(path: str) -> pd.DataFrame:
 
 catalog_df = load_catalog(DATA_PATH)
 
-# Unique categories from the sheet (e.g. beach, bathroom, bedroom)
-CATEGORIES = sorted(
-    {c.capitalize() for c in catalog_df["category"].unique() if isinstance(c, str)}
-)
-
-
-# ---------- SIMPLE NLP HELPERS ----------
+# ---------------------------------------------------------
+# KEYWORD / CATEGORY HANDLING
+# ---------------------------------------------------------
 
 CATEGORY_KEYWORDS = {
-    "towel": ["towel", "bath towel", "hand towel"],
+    "towel": ["towel", "hand towel", "bath towel"],
     "beach_towel": ["beach towel", "cabana"],
     "sheet": ["sheet set", "sheet"],
     "quilt": ["quilt", "coverlet"],
     "comforter": ["comforter", "duvet"],
     "bedding": ["quilt", "coverlet", "sheet", "comforter", "bedding"],
+}
+
+# Map product categories in Excel to our high-level usage buckets
+# (these should match values you put in the Category column, e.g. Bathroom / Bedroom / Beach)
+CATEGORY_ROOM_MAP = {
+    "towel": ["bathroom", "beach"],
+    "beach_towel": ["beach"],
+    "sheet": ["bedroom"],
+    "quilt": ["bedroom"],
+    "comforter": ["bedroom"],
+    "bedding": ["bedroom"],
 }
 
 COLOR_WORDS = [
@@ -102,15 +122,12 @@ COLOR_WORDS = [
 
 
 def detect_category_terms(text: str) -> Tuple[List[str], List[str]]:
-    """
-    Very simple keyword extractor.
-    Returns (category_terms, color_terms).
-    """
+    """Return (category_terms, color_terms) from a free-text query."""
     t = text.lower()
     found_cats: List[str] = []
     found_colors: List[str] = []
 
-    # Category-type words (towels vs sheets vs quilts, etc.)
+    # category by words in query
     if "beach towel" in t or ("beach" in t and "towel" in t):
         found_cats.append("beach_towel")
     elif "towel" in t:
@@ -125,97 +142,29 @@ def detect_category_terms(text: str) -> Tuple[List[str], List[str]]:
     if "bedding" in t or "bed set" in t:
         found_cats.append("bedding")
 
-    # Colour words
+    # colors
     for c in COLOR_WORDS:
         if c in t:
             found_colors.append(c)
 
-    # De-duplicate while preserving order
+    # de-dup while preserving order
     found_cats = list(dict.fromkeys(found_cats))
     found_colors = list(dict.fromkeys(found_colors))
 
     return found_cats, found_colors
 
 
-def detect_room_category(text: str) -> Optional[str]:
-    """
-    Guess room category from free text: Bathroom / Bedroom / Beach.
-    Returns the capitalised category from CATEGORIES if likely, else None.
-    """
-    t = text.lower()
-
-    # Beach / outdoor
-    if "beach" in t or "pool" in t or "cabana" in t:
-        for c in CATEGORIES:
-            if c.lower().startswith("beach"):
-                return c
-
-    # Bathroom
-    if any(word in t for word in ["bathroom", "shower", "vanity", "bath towel", "bath mat"]):
-        for c in CATEGORIES:
-            if c.lower().startswith("bath"):
-                return c
-
-    # Bedroom / bed
-    if any(word in t for word in ["bedroom", "bed", "duvet", "comforter", "sheet", "pillow"]):
-        for c in CATEGORIES:
-            if c.lower().startswith("bed"):
-                return c
-
-    return None
-
-
-# ---------- PRODUCT IMAGE HELPER ----------
-
-def guess_local_image_path(row: pd.Series) -> Optional[str]:
-    """
-    Best-effort guess for a local image filename based on product name & colour.
-    If it can't find a match, returns None and we fall back to the URL.
-    """
-
-    def slugify(text: str) -> str:
-        text = text.replace("%", "").replace("/", " ").replace("|", " ")
-        text = "".join(ch if ch.isalnum() or ch in (" ", "-", "_") else "" for ch in text)
-        return "_".join(text.split())
-
-    # Try "Name Color.ext"
-    candidates = []
-
-    if "name" in row and "color" in row:
-        base = f"{row['name']} {row['color']}"
-        candidates.append(slugify(base))
-
-    if "name" in row:
-        candidates.append(slugify(row["name"]))
-
-    for slug in candidates:
-        for ext in (".jpg", ".jpeg", ".png", ".webp"):
-            path = f"{slug}{ext}"
-            if os.path.exists(path):
-                return path
-
-    return None
-
-
-# ---------- CATALOG SEARCH ----------
-
 def filter_catalog_by_query(
-    df: pd.DataFrame,
-    query: str,
-    max_results: int = 8,
-    room_category: Optional[str] = None,
+    df: pd.DataFrame, query: str, max_results: int = 8
 ) -> pd.DataFrame:
     """
-    Looser matching:
-    - Optionally filter by detected ROOM CATEGORY (bathroom / bedroom / beach).
-    - Filter by detected product category words (towels vs sheets vs quilts).
-    - Optionally narrow by colour words.
-    - If still empty, fall back to substring match on product name.
+    Looser matching using:
+      - category words in the query
+      - optional Category column
+      - color words
+      - fallback to substring match on name
     """
     if not query:
-        if room_category:
-            cat_mask = df["category_lower"].str.contains(room_category.lower(), na=False)
-            return df[cat_mask].head(max_results)
         return df.head(max_results)
 
     q = query.lower()
@@ -223,50 +172,74 @@ def filter_catalog_by_query(
 
     mask = pd.Series(True, index=df.index)
 
-    # 1. Room category constraint (from excel Category column)
-    if room_category:
-        mask &= df["category_lower"].str.contains(room_category.lower(), na=False)
-
-    # 2. Product category words (towel, sheet, quilt, etc.)
-    if cat_terms:
+    # 1) Prefer filtering by Excel Category when possible
+    if cat_terms and "category_lower" in df.columns:
         cat_mask = pd.Series(False, index=df.index)
         for cat in cat_terms:
-            keywords = CATEGORY_KEYWORDS.get(cat, [])
-            for kw in keywords:
-                cat_mask |= df["name_lower"].str.contains(kw, na=False)
-        mask &= cat_mask
+            target_cats = CATEGORY_ROOM_MAP.get(cat, [])
+            for room_cat in target_cats:
+                cat_mask |= df["category_lower"].str.contains(room_cat, na=False)
+        if cat_mask.any():
+            mask &= cat_mask
 
-    # 3. Colour constraints (soft — if they remove everything, skip them)
+    # 2) Fallback: filter by keywords in the product name
+    if cat_terms:
+        by_name_mask = pd.Series(False, index=df.index)
+        for cat in cat_terms:
+            kws = CATEGORY_KEYWORDS.get(cat, [])
+            for kw in kws:
+                by_name_mask |= df["name_lower"].str.contains(kw, na=False)
+        if by_name_mask.any():
+            mask &= by_name_mask
+
+    # 3) Color constraints (soft: only use if they don't erase everything)
     if color_terms:
         color_mask = pd.Series(False, index=df.index)
         for c in color_terms:
-            color_mask |= df["color_lower"].str.contains(c, na=False) | df["name_lower"].str.contains(
-                c, na=False
-            )
+            color_mask |= df["color_lower"].str.contains(c, na=False)
+            color_mask |= df["name_lower"].str.contains(c, na=False)
         narrowed = df[mask & color_mask]
         if not narrowed.empty:
             mask &= color_mask
 
     results = df[mask]
 
-    # 4. Fallback: substring search on product name
+    # 4) Final fallback: simple word match on product name
     if results.empty:
         simple_mask = pd.Series(False, index=df.index)
         for word in q.split():
             simple_mask |= df["name_lower"].str.contains(word, na=False)
-        if room_category:
-            simple_mask &= df["category_lower"].str.contains(room_category.lower(), na=False)
         results = df[simple_mask]
 
     return results.head(max_results)
 
 
-# ---------- RENDERING HELPERS ----------
+# ---------------------------------------------------------
+# RENDERING UTILITIES
+# ---------------------------------------------------------
+
+
+def get_local_image_path(row: pd.Series) -> Optional[str]:
+    """
+    Prefer local image file from the repo if specified and exists.
+    Otherwise return None (the caller can fall back to image_url).
+    """
+    fname = row.get("image_file", "")
+    fname = str(fname).strip()
+    if not fname or fname.lower() == "nan":
+        return None
+
+    # The file is assumed to live in the same directory as the app (repo root)
+    path = os.path.join(".", fname)
+    if os.path.exists(path):
+        return path
+    return None
+
 
 def render_product_card(row: pd.Series) -> None:
     cols = st.columns([1, 2.5])
     with cols[0]:
-        local_path = guess_local_image_path(row)
+        local_path = get_local_image_path(row)
         if local_path:
             st.image(local_path, use_column_width=True)
         elif row.get("image_url") and str(row["image_url"]).startswith("http"):
@@ -276,8 +249,6 @@ def render_product_card(row: pd.Series) -> None:
         st.markdown(f"**{row['name']}**")
         st.write(f"• Color: {row['color']}")
         st.write(f"• Price: {row['price']}")
-        if row.get("category"):
-            st.write(f"• Category: {row['category']}")
         if row.get("amazon"):
             st.markdown(f"[View on Amazon]({row['amazon']})")
 
@@ -286,7 +257,7 @@ def render_product_list(df: pd.DataFrame) -> None:
     if df.empty:
         st.info(
             "We couldn’t find matching products in the catalog for that request. "
-            "Try adding a bit of detail, like *'navy striped bath towels'* or "
+            "Try a bit more detail, like *'navy striped bath towels'* or "
             "*'white quilt for queen bed'*."
         )
         return
@@ -296,42 +267,97 @@ def render_product_list(df: pd.DataFrame) -> None:
         st.markdown("---")
 
 
-# ---------- STORE SHELF IMAGE GENERATION ----------
+def describe_room_layout(image_bytes: bytes) -> str:
+    """
+    Use the vision model to describe the layout of an uploaded room photo.
+    This description is passed into the image generator so it at least
+    tries to keep a similar layout.
+    """
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/png;base64,{b64}"
 
-def generate_store_shelf_image(products: pd.DataFrame, description: str) -> bytes:
-    """
-    Use only Market & Place products as inspiration to generate a *retail store shelf* scene.
-    Returns raw image bytes (PNG).
-    """
-    bullet_lines = []
-    for _, r in products.iterrows():
-        bullet_lines.append(
-            f"- {r['name']} (category: {r['category']}, color: {r['color']}, price: {r['price']})"
+    try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL_VISION,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an interior designer. "
+                    "Describe the layout and fixed elements of the room, "
+                    "like where the bed/shower/vanity is, wall colors, and flooring.",
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this room's layout in 4–6 short sentences."},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            max_tokens=250,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        # Fallback if anything goes wrong
+        return (
+            "Use a clean, realistic layout typical for this room type. "
+            "Include the usual fixed elements (vanity, shower, bed, etc.) "
+            "but focus on styling the textiles."
         )
 
-    product_snippet = (
-        "\n".join(bullet_lines) if bullet_lines else "Market & Place towels and bedding in neutral colours."
-    )
+
+def generate_room_concept_image(
+    room_type: str,
+    textiles_request: str,
+    uploaded_room_bytes: Optional[bytes],
+    catalog: pd.DataFrame,
+) -> Tuple[bytes, pd.DataFrame]:
+    """
+    Generate a concept image for a room using Market & Place products as inspiration.
+    Returns (image_bytes, products_used).
+    """
+    layout_description = ""
+    if uploaded_room_bytes:
+        layout_description = describe_room_layout(uploaded_room_bytes)
+
+    # Choose products from the catalog that best match the request
+    products = filter_catalog_by_query(catalog, textiles_request or room_type, max_results=6)
+
+    # Build product snippet used to constrain the model
+    if products.empty:
+        product_snippet = (
+            "Market & Place textiles from the catalog – towels, sheets, quilts, and related items."
+        )
+    else:
+        bullet_lines = []
+        for _, r in products.iterrows():
+            bullet_lines.append(
+                f"- {r['name']} (color: {r['color']}, price: {r['price']})"
+            )
+        product_snippet = "\n".join(bullet_lines)
 
     prompt = f"""
-You are generating a **retail store shelf or aisle** concept image for Market & Place.
+You are designing a **Market & Place** styled interior.
 
-STRICT SCENE REQUIREMENTS:
-- It must clearly be a store shelf / showroom, not a home bathroom or bedroom.
-- Show long shelving bays with neatly folded stacks of textiles and some hanging pieces.
-- Do NOT show bathtubs, sinks, toilets, beds, sofas, or residential furniture.
-- No people and no visible brand logos.
+Room type: {room_type}
 
-Use ONLY the following Market & Place products as inspiration for colours, patterns, and textures.
-Do not invent totally unrelated products:
+If a reference room layout is described, keep that layout very similar:
+{layout_description or "Use a simple, realistic layout typical for this room type."}
 
+Customer request for textiles and style:
+\"\"\"{textiles_request or "Create a tasteful, modern Market & Place look using coordinating textiles."}\"\"\".
+
+VERY IMPORTANT RULES (NUCLEAR PRIORITY):
+- Textiles (towels, sheets, quilts, duvet covers, curtains, throws) must be inspired ONLY by
+  the following Market & Place products. Do **not** invent random new products or wild patterns.
+
+Market & Place products (the only textile inspirations you may use):
 {product_snippet}
 
-Customer request / styling direction:
-\"\"\"{description}\"\"\".
-
-Render a clean, well-lit store interior with multiple rows of shelves and an end-cap display,
-styled using those products. Prioritise matching product CATEGORY and COLOUR.
+Additional rules:
+- Keep walls, floors, and fixed fixtures realistic and not overly busy.
+- Focus visual interest on the textiles from the products above.
+- Photorealistic rendering, soft natural lighting, no people, no brand logos.
 """
 
     img_resp = client.images.generate(
@@ -340,45 +366,52 @@ styled using those products. Prioritise matching product CATEGORY and COLOUR.
         size="1024x1024",
         n=1,
     )
-
     b64 = img_resp.data[0].b64_json
-    return base64.b64decode(b64)
+    img_bytes = base64.b64decode(b64)
+
+    return img_bytes, products
 
 
-# ---------- LAYOUT: COMPACT HEADER ----------
+# ---------------------------------------------------------
+# HEADER
+# ---------------------------------------------------------
 
-header_cols = st.columns([1, 3, 1])
-with header_cols[1]:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, use_column_width=False, width=420)
-
-    st.markdown(
-        "<h1 style='text-align:center; margin-top:0.5rem; margin-bottom:0.25rem;'>"
-        "Market & Place AI Stylist</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center; margin:0; font-size:0.95rem;'>"
-        "Chat with an AI stylist, search the Market & Place catalog, and generate concept "
-        "visualizations using your own product file."
-        "</p>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center; margin-top:0.35rem;'>"
-        "<a href='https://marketandplace.co/' style='text-decoration:none;'>"
-        "← Return to Market & Place website</a></p>",
-        unsafe_allow_html=True,
-    )
+with st.container():
+    h1, h2, h3 = st.columns([1, 2, 1])
+    with h2:
+        if os.path.exists(LOGO_PATH):
+            st.image(
+                LOGO_PATH,
+                use_column_width=False,
+                width=260,
+            )
+        st.markdown(
+            "<h2 style='text-align:center; margin-bottom:0.3rem;'>Market & Place AI Stylist</h2>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p style='text-align:center; margin-top:0;'>"
+            "Chat with an AI stylist, search the Market & Place catalog, "
+            "and generate concept visualizations using your own product file."
+            "</p>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<p style='text-align:center; margin-top:0.25rem;'>"
+            "<a href='https://marketandplace.co/' style='text-decoration:none;'>"
+            "← Return to Market & Place website</a></p>",
+            unsafe_allow_html=True,
+        )
 
 st.markdown("---")
 
-
-# ---------- MAIN LAYOUT (2 COLUMNS) ----------
+# ---------------------------------------------------------
+# MAIN LAYOUT
+# ---------------------------------------------------------
 
 left_col, right_col = st.columns([1, 1], gap="large")
 
-# ----- LEFT: ASK THE AI STYLIST + QUICK CATALOG PEEK -----
+# -------------------- LEFT: AI STYLIST & CATALOG --------------------
 
 with left_col:
     st.subheader("Ask the AI stylist")
@@ -391,20 +424,8 @@ with left_col:
         submitted = st.form_submit_button("Send")
 
     if submitted and user_query.strip():
-        detected_room_cat = detect_room_category(user_query)
-        cat_note = (
-            f" _(detected room category: **{detected_room_cat}**)_"
-            if detected_room_cat
-            else ""
-        )
-        st.markdown(f"### 🧵 {user_query.strip()}{cat_note}")
-
-        matches = filter_catalog_by_query(
-            catalog_df,
-            user_query,
-            max_results=6,
-            room_category=detected_room_cat,
-        )
+        st.markdown(f"### 🧵 {user_query.strip()}")
+        matches = filter_catalog_by_query(catalog_df, user_query, max_results=6)
         render_product_list(matches)
 
     st.markdown("---")
@@ -417,109 +438,114 @@ with left_col:
     )
 
     if peek_query.strip():
-        # No room context here – just show relevant products
         peek_matches = filter_catalog_by_query(catalog_df, peek_query, max_results=12)
         render_product_list(peek_matches)
     else:
         st.write("Type a keyword above to quickly peek at the catalog.")
 
 
-# ----- RIGHT: AI CONCEPT VISUALIZER (ROOM SUGGESTIONS + STORE SHELF) -----
+# -------------------- RIGHT: AI CONCEPT VISUALIZER --------------------
 
 with right_col:
     st.subheader("AI concept visualizer")
 
     st.write(
         "Generate a **styled concept** using Market & Place products. "
-        "You can either get product suggestions for a room, or generate a store shelf image."
+        "You can either create a room concept image or preview a store shelf look."
     )
 
     mode = st.radio(
         "What do you want to visualize?",
-        ["Room product suggestions", "Store shelf / showroom concept"],
+        ["Room concept image", "Store shelf / showroom concept"],
         horizontal=True,
     )
 
-    # --- ROOM PRODUCT SUGGESTIONS (catalog-only, no edits) ---
-    if mode == "Room product suggestions":
-        st.markdown("#### Room product suggestions")
+    # -------- ROOM CONCEPT IMAGE (with optional room upload) --------
+
+    if mode == "Room concept image":
+        st.markdown("#### Room concept image")
+
+        room_type = st.selectbox(
+            "Room type:",
+            ["Bathroom", "Bedroom", "Other"],
+            index=0,
+        )
 
         uploaded_room = st.file_uploader(
-            "Optional: upload a photo of your room (bathroom, bedroom, etc.)",
+            "Optional: upload a photo of your room to guide the layout (JPG/PNG).",
             type=["jpg", "jpeg", "png"],
-            help="The image is just for your reference – suggestions are catalog-only right now.",
+            key="room_photo",
         )
 
         textiles_request = st.text_input(
-            "What textiles would you like to add or change?",
-            placeholder="e.g. navy striped bath towels, white quilt, cabana stripe shower curtain",
+            "What textiles or style would you like to see?",
+            placeholder="e.g. navy striped bath towels, neutral quilt with blue accents",
             key="room_textiles_request",
         )
 
-        if st.button("Get product suggestions"):
-            st.markdown("### Suggested Market & Place products for your room")
-
+        if st.button("Generate room concept image"):
+            uploaded_bytes: Optional[bytes] = None
             if uploaded_room is not None:
-                st.caption(
-                    "Reference photo uploaded – suggestions below are from the catalog only "
-                    "(no image edits yet)."
+                uploaded_bytes = uploaded_room.getvalue()
+
+            with st.spinner("Generating room concept image…"):
+                img_bytes, used_products = generate_room_concept_image(
+                    room_type=room_type,
+                    textiles_request=textiles_request or "",
+                    uploaded_room_bytes=uploaded_bytes,
+                    catalog=catalog_df,
                 )
-                st.image(uploaded_room, use_column_width=True)
 
-            detected_room_cat = detect_room_category(textiles_request)
-            suggestions = filter_catalog_by_query(
-                catalog_df,
-                textiles_request or "",
-                max_results=8,
-                room_category=detected_room_cat,
+            st.markdown("### AI-generated room concept")
+            st.image(img_bytes, use_column_width=True)
+            st.caption(
+                "Concept image generated from the Market & Place catalog. "
+                "Layout is approximate; focus is on textile style inspired by your products."
             )
-            if detected_room_cat:
-                st.caption(f"Filtering by room category: **{detected_room_cat}**")
-            render_product_list(suggestions)
 
-    # --- STORE SHELF / SHOWROOM IMAGE GENERATOR ---
+            if not used_products.empty:
+                st.markdown("#### Products used as inspiration")
+                render_product_list(used_products)
+
+    # -------- STORE SHELF CONCEPT (using your real photo) --------
+
     else:
         st.markdown("#### Store shelf / showroom concept")
 
-        cols_top = st.columns([2, 1])
-        with cols_top[0]:
-            shelf_request = st.text_input(
-                "Describe the shelf you want to visualize:",
-                placeholder="e.g. cabana stripe beach towels in aqua and navy, folded stacks and matching mats",
-                key="shelf_request",
-            )
+        st.write(
+            "This uses your uploaded **store shelf** photo as the visual base and "
+            "recommends Market & Place products for that shelf."
+        )
 
-        with cols_top[1]:
-            shelf_category = st.selectbox(
-                "Shelf category (from catalog):",
-                options=CATEGORIES,
-                index=0 if CATEGORIES else 0,
-                help="This ensures the AI only uses products from the chosen section.",
-            )
+        shelf_request = st.text_input(
+            "Describe what you want to feature on the shelf:",
+            placeholder="e.g. aqua and navy cabana stripe beach towels, matching bath mats",
+            key="shelf_request",
+        )
 
-        # Optional reference shelf image
-        if os.path.exists(STORE_SHELF_REFERENCE):
-            st.caption("Reference Market & Place shelf photo (for style only):")
-            st.image(STORE_SHELF_REFERENCE, use_column_width=True)
+        if st.button("Show shelf and product ideas"):
+            st.markdown("### Store shelf photo")
 
-        if st.button("Generate store shelf concept image"):
-            with st.spinner("Generating store shelf concept…"):
-                shelf_products = filter_catalog_by_query(
-                    catalog_df,
-                    shelf_request or "",
-                    max_results=6,
-                    room_category=shelf_category,
+            if os.path.exists(STORE_SHELF_PHOTO):
+                st.image(STORE_SHELF_PHOTO, use_column_width=True)
+            else:
+                st.warning(
+                    f"Could not find `{STORE_SHELF_PHOTO}` in the repo. "
+                    "Please make sure the file is present next to this app."
                 )
 
-                img_bytes = generate_store_shelf_image(shelf_products, shelf_request or "")
+            st.caption(
+                "This is your real Market & Place store shelf photo. "
+                "Below are catalog products that match your request."
+            )
 
-                st.markdown("### AI-generated store shelf concept")
-                st.image(img_bytes, use_column_width=True)
-
-                st.caption(
-                    "Concept image generated from the Market & Place catalog. "
-                    "The scene is intended as a retail shelf / showroom, not a home bathroom or bedroom."
-                )
+            suggestions = filter_catalog_by_query(
+                catalog_df,
+                shelf_request or "",
+                max_results=12,
+            )
+            st.markdown("#### Suggested Market & Place products for this shelf")
+            render_product_list(suggestions)
 
 
 
