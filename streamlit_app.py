@@ -14,14 +14,14 @@ st.set_page_config(
     layout="wide",
 )
 
-OPENAI_MODEL_VISION = "gpt-4.1-mini"   # kept for possible future use
+OPENAI_MODEL_VISION = "gpt-4.1-mini"
 OPENAI_MODEL_IMAGE = "gpt-image-1"
 
 client = OpenAI()
 
-DATA_PATH = "market_and_place_products.xlsx"   # same folder as this file
-LOGO_PATH = "logo.png"                         # same folder as this file
-SHELF_BASE_PATH = "store shelf.jpg"            # your blank shelf photo
+DATA_PATH = "market_and_place_products.xlsx"  # same folder as this file
+LOGO_PATH = "logo.png"                        # same folder as this file
+SHELF_BASE_PATH = "store shelf.jpg"          # your reference shelf photo
 
 
 # ---------- DATA LOADING ----------
@@ -37,10 +37,9 @@ def load_catalog(path: str) -> pd.DataFrame:
         "Price": "price",
         "raw_amazon": "amazon",
         "Image URL:": "image_url",
-        "Category": "category",        # if present
+        "Category": "category",  # optional, if you added it
     })
 
-    # Safety: ensure strings
     for col in ["name", "color", "amazon", "image_url", "category"]:
         if col in df.columns:
             df[col] = df[col].astype(str)
@@ -48,32 +47,13 @@ def load_catalog(path: str) -> pd.DataFrame:
     df["name_lower"] = df["name"].str.lower()
     df["color_lower"] = df["color"].str.lower()
 
-    # Build a human-friendly label for dropdowns
-    def make_label(row):
-        pieces = [row["name"]]
-        if row.get("color") and row["color"].lower() != "nan":
-            pieces.append(f"Color: {row['color']}")
-        if row.get("category") and row["category"].lower() != "nan":
-            pieces.append(f"Category: {row['category']}")
-        if row.get("price") and str(row["price"]).lower() != "nan":
-            pieces.append(f"${row['price']}")
-        return " | ".join(pieces)
-
-    df["option_label"] = df.apply(make_label, axis=1)
-
     return df
 
 
 catalog_df = load_catalog(DATA_PATH)
 
-# Map from dropdown label -> dataframe index
-LABEL_TO_INDEX: Dict[str, int] = {
-    row.option_label: idx for idx, row in catalog_df.iterrows()
-}
-PRODUCT_OPTIONS: List[str] = list(LABEL_TO_INDEX.keys())
 
-
-# ---------- HELPER FUNCTIONS (SEARCH) ----------
+# ---------- SIMPLE SEARCH HELPERS ----------
 
 CATEGORY_KEYWORDS = {
     "towel": ["towel", "bath towel", "hand towel"],
@@ -96,8 +76,8 @@ COLOR_WORDS = [
 
 def detect_category_terms(text: str) -> Tuple[List[str], List[str]]:
     t = text.lower()
-    found_cats: List[str] = []
-    found_colors: List[str] = []
+    found_cats = []
+    found_colors = []
 
     if "beach towel" in t or ("beach" in t and "towel" in t):
         found_cats.append("beach_towel")
@@ -119,6 +99,7 @@ def detect_category_terms(text: str) -> Tuple[List[str], List[str]]:
 
     found_cats = list(dict.fromkeys(found_cats))
     found_colors = list(dict.fromkeys(found_colors))
+
     return found_cats, found_colors
 
 
@@ -164,19 +145,15 @@ def filter_catalog_by_query(df: pd.DataFrame, query: str, max_results: int = 8) 
 def render_product_card(row: pd.Series):
     cols = st.columns([1, 2.5])
     with cols[0]:
-        # Prefer local image file if it exists, otherwise image_url
-        local_name = f"{row['name']}.jpg"
-        if os.path.exists(local_name):
-            st.image(local_name, use_column_width=True)
-        elif row.get("image_url") and str(row["image_url"]).startswith("http"):
+        if row.get("image_url") and str(row["image_url"]).strip().lower().startswith(("http://", "https://")):
+            st.image(row["image_url"], use_column_width=True)
+        elif row.get("image_url") and os.path.exists(row["image_url"]):
             st.image(row["image_url"], use_column_width=True)
     with cols[1]:
         st.markdown(f"**{row['name']}**")
         st.write(f"• Color: {row['color']}")
-        if str(row.get("category", "")).lower() not in ("", "nan"):
-            st.write(f"• Category: {row['category']}")
         st.write(f"• Price: {row['price']}")
-        if row.get("amazon") and str(row["amazon"]).startswith("http"):
+        if row.get("amazon") and isinstance(row["amazon"], str) and row["amazon"].startswith("http"):
             st.markdown(f"[View on Amazon]({row['amazon']})")
 
 
@@ -194,47 +171,105 @@ def render_product_list(df: pd.DataFrame):
         st.markdown("---")
 
 
-# ---------- IMAGE GENERATION HELPERS (TEXT-TO-IMAGE) ----------
+# ---------- IMAGE / VISION HELPERS ----------
 
-def guess_room_type(notes: str) -> str:
-    t = (notes or "").lower()
-    if any(w in t for w in ["bedroom", "bed", "quilt", "sheet", "duvet", "comforter"]):
-        return "bedroom"
-    if "beach" in t:
-        return "beach bathroom"
-    if "living" in t or "sofa" in t:
-        return "living room"
-    return "bathroom"
+def bytes_to_data_uri(image_bytes: bytes, mime: str = "image/jpeg") -> str:
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    return f"data:{mime};base64,{b64}"
 
 
-def generate_room_concept_image(
-    product_row: pd.Series,
-    user_notes: str,
-) -> bytes:
+def analyze_room_with_vision(image_bytes: bytes) -> Dict[str, str]:
     """
-    Uses gpt-image-1 in a robust text-to-image mode.
-    We *describe* the desired result instead of trying to send the raw room photo
-    to avoid the 'image_url' / 'input[0].content' errors.
+    Ask the vision model to tell us:
+    - room type (bedroom, bathroom, etc.)
+    - style sentence
+    - layout sentence
     """
-    room_type = guess_room_type(user_notes)
+    data_uri = bytes_to_data_uri(image_bytes)
+
+    prompt = """
+You are an interior design expert. Look at this photo and respond in exactly this format:
+
+ROOMTYPE: <one- or two-word room type like "bedroom", "bathroom", "living room">
+STYLE: <one short sentence about colors, mood, and materials>
+LAYOUT: <one short sentence describing the layout and main furniture positions>
+
+No extra commentary.
+""".strip()
+
+    resp = client.responses.create(
+        model=OPENAI_MODEL_VISION,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                    {"type": "input_image", "image_url": {"url": data_uri}},
+                ],
+            }
+        ],
+    )
+
+    try:
+        text = resp.output[0].content[0].text
+    except Exception:
+        try:
+            text = resp.output_text
+        except Exception:
+            text = str(resp)
+
+    room_type = "room"
+    style = "neutral style"
+    layout = "standard layout"
+
+    for line in text.splitlines():
+        line = line.strip()
+        if line.upper().startswith("ROOMTYPE:"):
+            room_type = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("STYLE:"):
+            style = line.split(":", 1)[1].strip()
+        elif line.upper().startswith("LAYOUT:"):
+            layout = line.split(":", 1)[1].strip()
+
+    return {"room_type": room_type, "style": style, "layout": layout}
+
+
+# ---------- IMAGE GENERATION ----------
+
+def generate_room_concept_image(uploaded_room_file, product_row: pd.Series, styling_notes: str) -> bytes:
+    """
+    1) Describe the uploaded room with the vision model.
+    2) Ask the image model to render a new concept of the SAME room type and a similar layout,
+       featuring the selected Market & Place product as the main textile.
+    """
+    image_bytes = uploaded_room_file.getvalue()
+    room_info = analyze_room_with_vision(image_bytes)
+
+    product_desc = f"{product_row['name']} (color: {product_row['color']})"
+
+    notes = styling_notes.strip() if styling_notes else "Keep the design cohesive with the existing style."
 
     prompt = f"""
-Photo-realistic {room_type} styled with Market & Place textiles.
+You are creating a realistic interior concept image.
 
-Use the following Market & Place product as the hero item for all towels / bedding / textiles:
+ROOM TYPE AND LAYOUT TO PRESERVE
+- Room type: {room_info['room_type']}. Do NOT change to another type of room (no bathrooms if it is a bedroom, etc.).
+- Layout: {room_info['layout']} (keep the main furniture positions and camera angle similar).
 
-- Name: {product_row['name']}
-- Color: {product_row['color']}
-- Category: {product_row.get('category', '')}
+EXISTING STYLE
+- {room_info['style']}
 
-Design goals:
-- Keep a layout and architecture similar to a real customer photo.
-- Make it clear that the visible towels / bedding / shower curtain are this product.
-- Natural lighting, clean and modern, suitable for an e-commerce lifestyle image.
+FEATURED MARKET & PLACE PRODUCT
+- {product_desc}
 
-Customer styling notes (optional):
-\"\"\"{user_notes}\"\"\".
-"""
+GOAL
+- Replace or layer the existing textiles in the room (bedding, towels, curtains, rugs, etc.) with this Market & Place product where it makes sense.
+- Keep walls, windows, doors, and main furniture consistent with the described layout.
+- Avoid brand logos or text; patterns should look like the Market & Place product but generic.
+
+USER NOTES
+- {notes}
+""".strip()
 
     img_resp = client.images.generate(
         model=OPENAI_MODEL_IMAGE,
@@ -242,36 +277,37 @@ Customer styling notes (optional):
         size="1024x1024",
         n=1,
     )
+
     b64 = img_resp.data[0].b64_json
     return base64.b64decode(b64)
 
 
-def generate_store_shelf_concept(
-    product_row: pd.Series,
-    user_notes: str,
-) -> bytes:
+def generate_store_shelf_concept(product_row: pd.Series, styling_notes: str) -> bytes:
     """
-    Same idea: pure text prompt describing the shelf fully stocked
-    with the selected Market & Place product.
+    Generate a retail shelf / showroom bay image using only Market & Place products as inspiration.
+    This is a fresh concept image (not an exact edit of the reference shelf photo).
     """
+    product_desc = f"{product_row['name']} (color: {product_row['color']})"
+    notes = styling_notes.strip() if styling_notes else "Neat, well-organized merchandising."
+
     prompt = f"""
-Retail store shelf / showroom concept for Market & Place.
+Create a realistic concept image of a Market & Place retail store shelf / showroom bay.
 
-Scene requirements:
-- A long aisle of real retail shelving, similar to standard store gondola shelves.
-- Shelves fully stocked and neatly folded / hung.
-- No bathtubs, beds, or home furniture. This is a store, not a home.
-- No logos or text in the image.
+REQUIREMENTS
+- It must clearly be a retail store interior, not a home bathroom or bedroom.
+- Show long white gondola-style shelves similar to a real store aisle.
+- No people, no brand logos.
 
-Use ONLY this Market & Place product as inspiration for all visible textiles:
+FEATURED MARKET & PLACE PRODUCT
+- {product_desc}
 
-- Name: {product_row['name']}
-- Color: {product_row['color']}
-- Category: {product_row.get('category', '')}
+GOAL
+- Fill the shelves mainly with stacks and/or hanging displays of this product and closely related colorways.
+- Keep the display tidy and visually appealing, like a high-end retailer.
 
-Customer styling notes (optional):
-\"\"\"{user_notes}\"\"\".
-"""
+USER NOTES
+- {notes}
+""".strip()
 
     img_resp = client.images.generate(
         model=OPENAI_MODEL_IMAGE,
@@ -279,20 +315,19 @@ Customer styling notes (optional):
         size="1024x1024",
         n=1,
     )
+
     b64 = img_resp.data[0].b64_json
     return base64.b64decode(b64)
 
 
-# ---------- LAYOUT: HEADER (CONDENSED) ----------
+# ---------- HEADER (CONDENSED) ----------
 
 header_cols = st.columns([1, 2, 1])
 with header_cols[1]:
     if os.path.exists(LOGO_PATH):
-        # Smaller logo, centered
-        st.image(LOGO_PATH, use_column_width=False, width=260)
+        st.image(LOGO_PATH, width=260)
     st.markdown(
-        "<h1 style='text-align:center; margin-top:0.1rem; margin-bottom:0.4rem;'>"
-        "Market & Place AI Stylist</h1>",
+        "<h2 style='text-align:center; margin-bottom:0.4rem;'>Market & Place AI Stylist</h2>",
         unsafe_allow_html=True,
     )
     st.markdown(
@@ -303,7 +338,7 @@ with header_cols[1]:
         unsafe_allow_html=True,
     )
     st.markdown(
-        "<p style='text-align:center; font-size:0.9rem;'>"
+        "<p style='text-align:center; margin-top:0;'>"
         "<a href='https://marketandplace.co/' style='text-decoration:none;'>"
         "← Return to Market & Place website</a></p>",
         unsafe_allow_html=True,
@@ -316,7 +351,7 @@ st.markdown("---")
 
 left_col, right_col = st.columns([1, 1], gap="large")
 
-# ----- LEFT: ASK THE AI STYLIST + QUICK CATALOG PEEK -----
+# ----- LEFT: ASK THE AI STYLIST + RANDOM CATALOG PEEK -----
 
 with left_col:
     st.subheader("Ask the AI stylist")
@@ -335,16 +370,16 @@ with left_col:
 
     st.markdown("---")
     st.subheader("Quick catalog peek")
+    st.caption("A few random Market & Place products from your catalog:")
 
-    # No search bar here anymore — just random products from the catalog
     if len(catalog_df) > 0:
-        preview_df = catalog_df.sample(
+        sample_df = catalog_df.sample(
             n=min(5, len(catalog_df)),
-            replace=False,
+            random_state=None,  # new random sample each run
         )
-        render_product_list(preview_df)
+        render_product_list(sample_df)
     else:
-        st.write("Catalog is empty.")
+        st.info("Catalog appears to be empty.")
 
 
 # ----- RIGHT: AI CONCEPT VISUALIZER (ROOM IMAGE + STORE SHELF IMAGE) -----
@@ -353,8 +388,9 @@ with right_col:
     st.subheader("AI concept visualizer")
 
     st.write(
-        "Generate a **styled concept** using Market & Place products. "
-        "Upload a room for AI styling, or generate a store shelf concept."
+        "Generate a **styled concept** using your own photos and Market & Place products. "
+        "Choose a product from the catalog, upload a room photo for styling, or "
+        "generate a store shelf concept."
     )
 
     mode = st.radio(
@@ -363,90 +399,89 @@ with right_col:
         horizontal=True,
     )
 
-    # --- ROOM CONCEPT IMAGE ---
-    if mode == "Room concept image":
-        st.markdown("#### Room concept image")
-
-        uploaded_room = st.file_uploader(
-            "Upload a photo of your room (bathroom, bedroom, etc.):",
-            type=["jpg", "jpeg", "png"],
-            key="room_upload",
-        )
-
-        # Dropdown of real catalog products
-        st.markdown("**Choose a Market & Place product to feature in this room:**")
-        selected_label_room = st.selectbox(
-            "Product from catalog:",
-            options=PRODUCT_OPTIONS,
-            key="room_product_select",
-        )
-        selected_row_room = catalog_df.loc[LABEL_TO_INDEX[selected_label_room]]
-
-        room_notes = st.text_input(
-            "Optional: any styling notes?",
-            placeholder="e.g. modern spa look, neutrals, add striped accents",
-            key="room_notes",
-        )
-
-        if uploaded_room is not None:
-            st.caption("Reference room photo (used as style inspiration):")
-            st.image(uploaded_room, use_column_width=True)
-
-        if st.button("Generate room concept image"):
-            with st.spinner("Generating AI room concept…"):
-                try:
-                    img_bytes = generate_room_concept_image(
-                        selected_row_room,
-                        room_notes or "",
-                    )
-                    st.image(img_bytes, use_column_width=True)
-                    st.caption(
-                        "Concept image generated from your notes and the selected "
-                        "Market & Place product. Layout is inspired by a typical room "
-                        "similar to your photo."
-                    )
-                except Exception as e:
-                    st.error(f"Image generation failed: {e}")
-
-    # --- STORE SHELF CONCEPT ---
+    # Common: select a product from the catalog
+    if len(catalog_df) == 0:
+        st.warning("No products found in the catalog file.")
     else:
-        st.markdown("#### Store shelf / showroom concept")
+        if mode == "Room concept image":
+            st.markdown("#### Room concept image")
 
-        if os.path.exists(SHELF_BASE_PATH):
-            st.image(
-                SHELF_BASE_PATH,
-                caption="Market & Place store shelf photo (visual reference).",
-                use_column_width=True,
+            selected_idx = st.selectbox(
+                "Choose a Market & Place product to feature in this room:",
+                options=catalog_df.index,
+                format_func=lambda i: f"{catalog_df.loc[i,'name']} | {catalog_df.loc[i,'color']} | ${catalog_df.loc[i,'price']}",
+                key="room_product_select",
+            )
+            selected_product = catalog_df.loc[selected_idx]
+
+            styling_notes = st.text_input(
+                "Optional: any styling notes?",
+                placeholder="e.g. modern spa look, neutrals, add striped accents",
+                key="room_style_notes",
             )
 
-        st.markdown("**Choose a Market & Place product to feature on the shelf:**")
-        selected_label_shelf = st.selectbox(
-            "Product from catalog:",
-            options=PRODUCT_OPTIONS,
-            key="shelf_product_select",
-        )
-        selected_row_shelf = catalog_df.loc[LABEL_TO_INDEX[selected_label_shelf]]
+            uploaded_room = st.file_uploader(
+                "Reference room photo (used as style inspiration):",
+                type=["jpg", "jpeg", "png"],
+                key="room_upload",
+            )
 
-        shelf_notes = st.text_input(
-            "Optional: any styling notes for the shelf?",
-            placeholder="e.g. alternating aqua and navy stacks, matching bath mats on bottom shelf",
-            key="shelf_notes",
-        )
+            if uploaded_room is not None:
+                st.image(uploaded_room, caption="Uploaded room photo", use_column_width=True)
 
-        if st.button("Generate store shelf concept image"):
-            with st.spinner("Generating AI store shelf concept…"):
-                try:
-                    img_bytes = generate_store_shelf_concept(
-                        selected_row_shelf,
-                        shelf_notes or "",
-                    )
-                    st.image(img_bytes, use_column_width=True)
-                    st.caption(
-                        "Concept image generated from the selected Market & Place product "
-                        "and your styling notes. Scene is a retail shelf / showroom."
-                    )
-                except Exception as e:
-                    st.error(f"Image generation failed: {e}")
+            if st.button("Generate room concept image"):
+                if uploaded_room is None:
+                    st.error("Please upload a room photo first.")
+                else:
+                    with st.spinner("Generating AI room concept…"):
+                        try:
+                            img_bytes = generate_room_concept_image(
+                                uploaded_room,
+                                selected_product,
+                                styling_notes,
+                            )
+                            st.image(img_bytes, use_column_width=True)
+                            st.caption(
+                                "AI-generated concept using your room photo as inspiration "
+                                "and the selected Market & Place product."
+                            )
+                        except Exception as e:
+                            st.error(f"Image generation failed: {e}")
+
+        else:
+            st.markdown("#### Store shelf / showroom concept")
+
+            if os.path.exists(SHELF_BASE_PATH):
+                st.image(
+                    SHELF_BASE_PATH,
+                    caption="Market & Place store shelf reference photo (for inspiration).",
+                    use_column_width=True,
+                )
+
+            selected_idx_shelf = st.selectbox(
+                "Choose a Market & Place product to feature on this shelf:",
+                options=catalog_df.index,
+                format_func=lambda i: f"{catalog_df.loc[i,'name']} | {catalog_df.loc[i,'color']} | ${catalog_df.loc[i,'price']}",
+                key="shelf_product_select",
+            )
+            shelf_product = catalog_df.loc[selected_idx_shelf]
+
+            shelf_notes = st.text_input(
+                "Optional: how would you like the shelf styled?",
+                placeholder="e.g. stacks of cabana stripe beach towels in aqua & navy, color-blocked by shelf",
+                key="shelf_notes",
+            )
+
+            if st.button("Generate store shelf concept image"):
+                with st.spinner("Generating AI store shelf concept…"):
+                    try:
+                        img_bytes = generate_store_shelf_concept(shelf_product, shelf_notes)
+                        st.image(img_bytes, use_column_width=True)
+                        st.caption(
+                            "AI-generated store shelf concept using the selected Market & Place product."
+                        )
+                    except Exception as e:
+                        st.error(f"Image generation failed: {e}")
 
 
 
