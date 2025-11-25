@@ -229,29 +229,42 @@ Render a clean, well-lit store interior with rows of shelves and an end-cap, sty
     return base64.b64decode(b64)
 
 
-# ---------- LAYOUT: HEADER ----------
+# ---------- LAYOUT: HEADER (CONDENSED) ----------
 
-header_cols = st.columns([1, 2, 1])
-with header_cols[1]:
-    # logo centered
+def render_condensed_header():
+    logo_html = ""
     if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, use_column_width=False, width=400)
-    st.markdown(
-        "<h1 style='text-align:center; margin-bottom:0'>Market & Place AI Stylist</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center;'>Chat with an AI stylist, search the Market & Place "
-        "catalog, and generate concept visualizations using your own product file.</p>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center;'><a href='https://marketandplace.co/' "
-        "style='text-decoration:none;'>← Return to Market & Place website</a></p>",
-        unsafe_allow_html=True,
-    )
+        with open(LOGO_PATH, "rb") as f:
+            logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+        logo_html = (
+            f"<img src='data:image/png;base64,{logo_b64}' "
+            f"alt='Market & Place logo' "
+            f"style='max-width:260px; margin-bottom:6px;'/>"
+        )
 
-st.markdown("---")
+    st.markdown(
+        f"""
+        <div style='text-align:center; padding-top:10px; padding-bottom:4px;'>
+            {logo_html}
+            <h1 style='font-size:34px; margin:2px 0 4px 0;'>
+                Market & Place AI Stylist
+            </h1>
+            <p style='font-size:15px; margin:0 0 4px 0;'>
+                Chat with an AI stylist, search the Market & Place catalog, and generate
+                concept visualizations using your own product file.
+            </p>
+            <a href='https://marketandplace.co/'
+               style='font-size:13px; text-decoration:none;'>
+               &larr; Return to Market & Place website
+            </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown("---")
+
+
+render_condensed_header()
 
 
 # ---------- MAIN LAYOUT (2 COLUMNS) ----------
