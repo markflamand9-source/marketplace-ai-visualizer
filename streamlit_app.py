@@ -17,7 +17,8 @@ st.set_page_config(
     layout="wide",
 )
 
-OPENAI_MODEL_VISION = "gpt-4.1-mini"
+# IMPORTANT: use a vision-capable model here
+OPENAI_MODEL_VISION = "gpt-4.1"      # was "gpt-4.1-mini" (no image support)
 OPENAI_MODEL_IMAGE = "gpt-image-1"
 
 client = OpenAI()
@@ -236,7 +237,7 @@ def encode_file_to_data_url(binary: bytes, mime_type: str = "image/jpeg") -> str
 
 def describe_photo_with_vision(image_bytes: bytes, mime_type: str, guidance: str) -> str:
     """
-    Use GPT-4.1-mini with vision to describe a photo (layout, surfaces, etc.).
+    Use GPT-4.1 with vision to describe a photo (layout, surfaces, etc.).
     """
     data_url = encode_file_to_data_url(image_bytes, mime_type=mime_type)
 
@@ -394,7 +395,7 @@ Render a clean, well-lit store interior with those Market & Place products displ
 header_cols = st.columns([1, 2, 1])
 with header_cols[1]:
     if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=300)  # much smaller than before
+        st.image(LOGO_PATH, width=300)  # smaller logo
     st.markdown(
         "<h2 style='text-align:center; margin-bottom:0.25rem;'>Market & Place AI Stylist</h2>",
         unsafe_allow_html=True,
