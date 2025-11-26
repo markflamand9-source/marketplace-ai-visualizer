@@ -244,25 +244,68 @@ Extra styling notes from the customer: {styling_notes or 'no extra notes'}.
 
 # ---------- LAYOUT: HEADER ----------
 
-hcol1, hcol2, hcol3 = st.columns([1, 2, 1])
-with hcol2:
-    if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, width=260)
+st.markdown(
+    """
+    <style>
+        /* Center the header container */
+        .mp-header { 
+            text-align: center; 
+            margin-top: -20px;
+        }
+        /* Center the logo image */
+        .mp-header img {
+            display: block;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        /* Condense title text */
+        .mp-title {
+            font-size: 1.9rem;
+            margin-top: 0.2rem;
+            margin-bottom: 0.2rem;
+            font-weight: 600;
+        }
+        .mp-subtitle {
+            font-size: 1rem;
+            margin-top: 0rem;
+            margin-bottom: 0.3rem;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# Render header
+st.markdown("<div class='mp-header'>", unsafe_allow_html=True)
+
+# Centered logo
+if os.path.exists(LOGO_PATH):
     st.markdown(
-        "<h2 style='text-align:center; margin-bottom:0.25rem;'>Market & Place AI Stylist</h2>",
-        unsafe_allow_html=True,
+        f"<img src='{LOGO_PATH}' width='260'>",
+        unsafe_allow_html=True
     )
-    st.markdown(
-        "<p style='text-align:center; margin-top:0;'>Chat with an AI stylist, "
-        "search the Market & Place catalog, and generate concept visualizations "
-        "using your own product file.</p>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<p style='text-align:center; margin-top:0.25rem;'><a href='https://marketandplace.co/' "
-        "style='text-decoration:none;'>← Return to Market & Place website</a></p>",
-        unsafe_allow_html=True,
-    )
+else:
+    st.markdown("<h1>🧵</h1>", unsafe_allow_html=True)
+
+# Centered title + description
+st.markdown(
+    "<div class='mp-title'>Market & Place AI Stylist</div>",
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    "<div class='mp-subtitle'>Chat with an AI stylist, search the Market & Place catalog, "
+    "and generate concept visualizations using your own product file.</div>",
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    "<p style='text-align:center;'><a href='https://marketandplace.co/' "
+    "style='text-decoration:none;'>← Return to Market & Place website</a></p>",
+    unsafe_allow_html=True
+)
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
