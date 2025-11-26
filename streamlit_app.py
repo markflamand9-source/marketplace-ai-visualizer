@@ -391,7 +391,8 @@ with right_col:
         horizontal=True,
     )
 
-    product_names = sorted(catalog_df["name"].unique().tolist())
+    # 🔴 CHANGED THIS LINE ONLY → now uses the FULL catalog, no .unique() or sorting
+    product_names = catalog_df["name"].tolist()
 
     # --- ROOM CONCEPT IMAGE (image edit) ---
     if mode == "Room concept image":
@@ -483,13 +484,3 @@ with right_col:
                         )
                     except Exception as e:
                         st.error(f"Image generation failed: {e}")
-
-
-
-
-
-
-
-
-
-
