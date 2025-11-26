@@ -242,70 +242,54 @@ Extra styling notes from the customer: {styling_notes or 'no extra notes'}.
     return decode_image_response(img_resp)
 
 
-# ---------- LAYOUT: HEADER ----------
+# ------------ HEADER ------------
+
+import base64
+
+def load_base64_image(path):
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode()
+    return encoded
+
+# Load logo safely
+logo_b64 = load_base64_image(LOGO_PATH)
 
 st.markdown(
-    """
+    f"""
     <style>
-        /* Center the header container */
-        .mp-header { 
-            text-align: center; 
-            margin-top: -20px;
-        }
-        /* Center the logo image */
-        .mp-header img {
-            display: block;
+        .header-wrapper {{
+            text-align: center;
+            margin-top: -40px;
+            margin-bottom: -10px;
+        }}
+        .header-logo {{
+            width: 260px;
             margin-left: auto;
             margin-right: auto;
-        }
-        /* Condense title text */
-        .mp-title {
-            font-size: 1.9rem;
-            margin-top: 0.2rem;
-            margin-bottom: 0.2rem;
+            display: block;
+        }}
+        .header-title {{
+            font-size: 1.7rem !important;
             font-weight: 600;
-        }
-        .mp-subtitle {
-            font-size: 1rem;
-            margin-top: 0rem;
-            margin-bottom: 0.3rem;
-        }
+            margin-top: 0px;
+        }}
+        .header-sub {{
+            font-size: 1rem !important;
+            margin-top: -5px;
+        }}
     </style>
+
+    <div class="header-wrapper">
+        <img class="header-logo" src="data:image/png;base64,{logo_b64}">
+        <div class="header-title">Market & Place AI Stylist</div>
+        <div class="header-sub">
+            Chat with an AI stylist, search the Market & Place catalog, and generate concept visualizations using your own product file.
+        </div>
+        <p><a href='https://marketandplace.co/'>← Return to Market & Place website</a></p>
+    </div>
     """,
     unsafe_allow_html=True
 )
-
-# Render header
-st.markdown("<div class='mp-header'>", unsafe_allow_html=True)
-
-# Centered logo
-if os.path.exists(LOGO_PATH):
-    st.markdown(
-        f"<img src='{LOGO_PATH}' width='260'>",
-        unsafe_allow_html=True
-    )
-else:
-    st.markdown("<h1>🧵</h1>", unsafe_allow_html=True)
-
-# Centered title + description
-st.markdown(
-    "<div class='mp-title'>Market & Place AI Stylist</div>",
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    "<div class='mp-subtitle'>Chat with an AI stylist, search the Market & Place catalog, "
-    "and generate concept visualizations using your own product file.</div>",
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    "<p style='text-align:center;'><a href='https://marketandplace.co/' "
-    "style='text-decoration:none;'>← Return to Market & Place website</a></p>",
-    unsafe_allow_html=True
-)
-
-st.markdown("</div>", unsafe_allow_html=True)
 
 st.markdown("---")
 
