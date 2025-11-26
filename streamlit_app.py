@@ -100,40 +100,90 @@ def detect_category_terms(text: str) -> Tuple[List[str], List[str]]:
 
 
 def filter_catalog_by_query(df: pd.DataFrame, query: str, max_results: int = 8) -> pd.DataFrame:
+    """
+    Smarter catalog search that:
+    - Treats generic 'towels' / 'luxury towels' as **bathroom** towels
+    - Only prefers beach/cabana towels when the user actually mentions beach/cabana
+    - Still supports other categories via keyword matching (sheets, quilts, etc.)
+    """
     if not query:
         return df.head(max_results)
 
-    q = query.lower()
+    q = query.lower().strip()
+    words = q.split()
+
+    # --- Intent detection ---
+    is_towel_query = "towel" in q or "towels" in q
+
+    wants_beach = any(w in q for w in ["beach", "cabana", "pool", "sand"])
+    wants_bathroom = any(w in q for w in ["bath", "bathroom", "spa", "luxury", "hotel"])
+
+    # default: if it's just "towels" (or similar) and user didn't say beach → assume bathroom
+    if is_towel_query and not wants_beach:
+        wants_bathroom = True
+
+    # also keep previous category / color hints for non-towel queries
     cat_terms, color_terms = detect_category_terms(q)
 
-    mask = pd.Series(True, index=df.index)
+    scored_rows = []
 
-    if cat_terms:
-        cat_mask = pd.Series(False, index=df.index)
-        for cat in cat_terms:
-            keywords = CATEGORY_KEYWORDS.get(cat, [])
-            for kw in keywords:
-                cat_mask |= df["name_lower"].str.contains(kw, case=False, na=False)
-        mask &= cat_mask
+    for idx, row in df.iterrows():
+        name = row["name_lower"]
+        color = row["color_lower"]
+        category = str(row.get("category", "")).lower()
 
-    if color_terms:
-        color_mask = pd.Series(False, index=df.index)
-        for c in color_terms:
-            color_mask |= df["color_lower"].str.contains(c, case=False, na=False) | \
-                          df["name_lower"].str.contains(c, case=False, na=False)
-        narrowed = df[mask & color_mask]
-        if not narrowed.empty:
-            mask &= color_mask
+        score = 0
 
-    results = df[mask]
+        # Basic keyword overlap in name & color
+        for w in words:
+            if w and w in name:
+                score += 2
+            if w and w in color:
+                score += 1
 
-    if results.empty:
-        simple_mask = pd.Series(False, index=df.index)
-        for word in q.split():
-            simple_mask |= df["name_lower"].str.contains(word, case=False, na=False)
-        results = df[simple_mask]
+        # Towel-specific weighting
+        if is_towel_query and "towel" in name:
+            score += 1  # any towel gets a small boost
 
-    return results.head(max_results)
+        # Beach vs bathroom preference using Category column & name
+        if wants_beach:
+            if "beach" in category or "beach" in name or "cabana" in name:
+                score += 4
+            if "bathroom" in category:
+                score -= 2  # push bath towels down for explicit beach queries
+
+        if wants_bathroom:
+            if "bathroom" in category:
+                score += 4
+            if "beach" in category:
+                score -= 2  # de-prioritize beach towels for non-beach towel queries
+
+        # Non-towel category hints (sheets, quilts, etc.)
+        if cat_terms:
+            for cat in cat_terms:
+                keywords = CATEGORY_KEYWORDS.get(cat, [])
+                if any(kw in name for kw in keywords):
+                    score += 2
+
+        # Optional: color hints from earlier helper
+        if color_terms:
+            if any(c in name or c in color for c in color_terms):
+                score += 1
+
+        if score > 0:
+            scored_rows.append((idx, score))
+
+    # If scoring found something, sort by score
+    if scored_rows:
+        scored_rows.sort(key=lambda x: x[1], reverse=True)
+        top_indices = [idx for idx, _ in scored_rows[:max_results]]
+        return df.loc[top_indices]
+
+    # Fallback: simple substring search like before
+    simple_mask = pd.Series(False, index=df.index)
+    for w in words:
+        simple_mask |= df["name_lower"].str.contains(w, case=False, na=False)
+    return df[simple_mask].head(max_results)
 
 
 # ---------- RENDERING HELPERS ----------
