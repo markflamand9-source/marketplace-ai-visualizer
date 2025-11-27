@@ -391,22 +391,27 @@ with right_col:
         horizontal=True,
     )
 
-    # Use the full catalog but show each product name only once in the dropdown
-    product_names = list(dict.fromkeys(catalog_df["name"].tolist()))  # ← changed
+    # 🔹 DROPDOWN: use each catalog row once, labeled with name + color
+    product_indices = catalog_df.index.tolist()
+
+    def format_product(idx: int) -> str:
+        row = catalog_df.loc[idx]
+        return f"{row['name']} | Color: {row['color']}"
 
     # --- ROOM CONCEPT IMAGE (image edit) ---
     if mode == "Room concept image":
         st.markdown("#### Room concept image")
 
-        if not product_names:
+        if not len(product_indices):
             st.warning("No products found in the catalog file.")
         else:
-            room_product_name = st.selectbox(
+            room_selected_idx = st.selectbox(
                 "Choose a Market & Place product to feature in this room:",
-                product_names,
+                options=product_indices,
+                format_func=format_product,
                 key="room_product_select",
             )
-            room_product_row = catalog_df[catalog_df["name"] == room_product_name].iloc[0]
+            room_product_row = catalog_df.loc[room_selected_idx]
             render_product_card(room_product_row)
 
             styling_notes = st.text_input(
@@ -448,7 +453,7 @@ with right_col:
 
         if not os.path.exists(SHELF_BASE_PATH):
             st.error(f"Base store shelf photo not found at `{SHELF_BASE_PATH}` in the repo.")
-        elif not product_names:
+        elif not len(product_indices):
             st.warning("No products found in the catalog file.")
         else:
             st.image(
@@ -457,12 +462,13 @@ with right_col:
                 use_column_width=True,
             )
 
-            shelf_product_name = st.selectbox(
+            shelf_selected_idx = st.selectbox(
                 "Choose a Market & Place product to feature on this shelf:",
-                product_names,
+                options=product_indices,
+                format_func=format_product,
                 key="shelf_product_select",
             )
-            shelf_product_row = catalog_df[catalog_df["name"] == shelf_product_name].iloc[0]
+            shelf_product_row = catalog_df.loc[shelf_selected_idx]
             render_product_card(shelf_product_row)
 
             shelf_notes = st.text_input(
@@ -484,4 +490,5 @@ with right_col:
                         )
                     except Exception as e:
                         st.error(f"Image generation failed: {e}")
+
 
