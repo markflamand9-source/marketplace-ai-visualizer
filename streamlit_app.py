@@ -391,8 +391,8 @@ with right_col:
         horizontal=True,
     )
 
-    # 🔴 CHANGED THIS LINE ONLY → now uses the FULL catalog, no .unique() or sorting
-    product_names = catalog_df["name"].tolist()
+    # Use the full catalog but show each product name only once in the dropdown
+    product_names = list(dict.fromkeys(catalog_df["name"].tolist()))  # ← changed
 
     # --- ROOM CONCEPT IMAGE (image edit) ---
     if mode == "Room concept image":
@@ -484,3 +484,4 @@ with right_col:
                         )
                     except Exception as e:
                         st.error(f"Image generation failed: {e}")
+
